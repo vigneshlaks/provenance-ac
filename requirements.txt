@@ -1,3 +1,4 @@
 requests
 responses
 pytest
+mlx-lm
