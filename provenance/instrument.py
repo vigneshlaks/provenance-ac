@@ -26,23 +26,42 @@ README for how each claim below was checked on Python 3.13:
      So provenance-aware concatenation is just operator overloading; no
      bytecode hook is needed for it either.
 
-3. sys.monitoring's CALL event *is* the right tool here, just not for
-   assignment/concat. It fires with signature
+3. sys.monitoring's CALL event fires with signature
    `(code, instruction_offset, callable, arg0)` on every call, including
-   calls to builtins/C functions -- confirmed empirically. That is exactly
-   what Phase 2 needs to intercept: source calls (open().read(), etc.), sink
-   calls (requests.post, subprocess.run), and @sanitizer-decorated function
-   calls, all of which are ordinary callables we can match `callable_`
-   against. This module sets up that CALL-event plumbing now so Phase 2 can
-   register match rules against it; it does not attempt to hook assignment
-   or concatenation, because those are already fully handled by storage.py.
+   calls to builtins/C functions -- confirmed empirically.
 
 Fallback clause per spec §4: if a future propagation rule genuinely can't be
 expressed as a wrapper-type override (e.g. f-string embedding via
 BUILD_STRING, which coerces to plain `str` regardless of what __format__
 returns -- also confirmed empirically), INSTRUCTION-level tracing is the
-documented fallback, deferred to Phase 2/propagation.py rather than built
+documented fallback, deferred to a later phase rather than built
 speculatively here.
+
+ADR-002 (Phase 2): CALL was *not* used for sink/source enforcement, despite
+the ADR-001 plan to use it there. Two things ruled it out, both confirmed
+empirically before rules.py was written:
+
+- `arg0` is only the *first* positional argument (and for bound methods,
+  it's `self`, not the caller's first real argument). §5 requires
+  inspecting *all* arguments (recursively through containers) at a sink
+  call; CALL's signature structurally cannot provide that.
+- A CALL callback that does real work -- a print(), a dict lookup, string
+  formatting -- is itself a call, which re-triggers CALL recursively.
+  Confirmed by crashing a Python process this way: a callback that called
+  print() cascaded into monitoring every call the interpreter made
+  internally (import machinery, module locks, ...) until it blew up. A
+  reentrancy guard (a module-level "already inside the callback" flag,
+  used below in _dispatch_call) fixes this, but it does not fix the arg0
+  problem.
+
+rules.py instead enforces sinks/sources by directly wrapping the target
+callables (monkey-patching e.g. `requests.post`, `subprocess.run`,
+`builtins.open`) so the wrapper receives the real `*args, **kwargs`
+directly from the call site -- no event system involved, no arg0
+limitation, no reentrancy risk. The CALL-event plumbing below is kept
+because it is real, working, tested infrastructure, and remains available
+for coverage/observability uses (e.g. "did we see a call to something we
+have no source/sink rule for") -- it is just not the enforcement mechanism.
 """
 
 from __future__ import annotations
@@ -57,19 +76,31 @@ CallHook = Callable[[Any, int, Any, Any], None]
 
 _call_hooks: list[CallHook] = []
 _active = False
+_dispatching = False
 
 
 def register_call_hook(hook: CallHook) -> None:
     """Register a callback invoked on every CALL event, with signature
-    (code, instruction_offset, callable, arg0). Intended consumer: Phase 2's
-    source/sink/sanitizer matching in rules.py.
+    (code, instruction_offset, callable, arg0). Not used for sink/source
+    enforcement -- see ADR-002 above -- but available for coverage/
+    observability tooling.
     """
     _call_hooks.append(hook)
 
 
 def _dispatch_call(code: Any, instruction_offset: int, callable_: Any, arg0: Any) -> None:
-    for hook in _call_hooks:
-        hook(code, instruction_offset, callable_, arg0)
+    # Reentrancy guard: any hook that itself makes a call (print, a dict
+    # lookup, ...) would otherwise re-trigger this same CALL event and
+    # cascade -- confirmed by crashing a process this way. See ADR-002.
+    global _dispatching
+    if _dispatching:
+        return
+    _dispatching = True
+    try:
+        for hook in _call_hooks:
+            hook(code, instruction_offset, callable_, arg0)
+    finally:
+        _dispatching = False
 
 
 def start() -> None:
