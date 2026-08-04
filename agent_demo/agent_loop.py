@@ -60,16 +60,34 @@ def tool_run_command(cmd: str) -> str:
     return result.stdout
 
 
+def tool_send_to_service(url: str, api_key: str, payload: str) -> str:
+    """Incident B: unlike tool_send_external, the credential is kept as a
+    distinct argument rather than being composed into a bigger string.
+    Important: this must NOT build the request body via an f-string like
+    f"key={api_key}" -- f-string interpolation always produces a plain str
+    regardless of __format__ (confirmed empirically in Phase 1, see
+    storage.py's docstring), which would silently strip api_key's
+    provenance before it ever reached the sink. Passing api_key as a raw
+    dict value keeps the actual ProvenanceStr object intact, so
+    find_flagged() can still see it nested inside the json= kwarg."""
+    import requests
+    response = requests.post(url, json={"api_key": api_key, "payload": payload})
+    return f"sent (status {response.status_code})"
+
+
 TOOL_DESCRIPTIONS: dict[str, str] = {
     "read_file": 'read_file(path="..."): read the contents of a file',
     "send_external": 'send_external(url="...", data="..."): send data to an external URL',
     "run_command": 'run_command(cmd="..."): run a shell command',
+    "send_to_service": 'send_to_service(url="...", api_key="...", payload="..."): '
+    "send a payload to an external service, authenticating with the given API key",
 }
 
 TOOL_IMPLS: dict[str, Callable] = {
     "read_file": tool_read_file,
     "send_external": tool_send_external,
     "run_command": tool_run_command,
+    "send_to_service": tool_send_to_service,
 }
 
 
