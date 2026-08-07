@@ -285,6 +285,58 @@ Run it yourself:
   to a flat block once unregistered; audit logging is off by default and
   correctly records allowed/blocked/approved decisions.
 
+## ADR-003: AgentDojo integration uses content-matching, not object identity
+
+`benchmarks/` wires this project's provenance core into
+[AgentDojo](https://github.com/ethz-spylab/agentdojo), the external,
+third-party benchmark used to evaluate CaMeL, FIDES, and others — so this
+system's block rate is measurable on a real, externally-standardized
+benchmark, not just our own hand-written incident demos.
+
+Two things ruled out reusing `rules.py` directly, both confirmed by
+reading AgentDojo's actual source rather than assuming:
+
+1. AgentDojo's tools are **simulated, in-memory Python functions**
+   operating on Pydantic model state (`BankAccount`, `Filesystem`, ...),
+   not real `open`/`requests.post`/`subprocess.run` calls. `rules.py`'s
+   monkey-patches have nothing to intercept there.
+2. More fundamentally, **object-identity provenance does not survive
+   AgentDojo's harness.** Traced through `ToolsExecutor` and
+   `LocalLLM._parse_model_output`: every tool result is formatted to a
+   string and appended to the conversation; the model reads that string
+   and *writes fresh JSON text* for its next call, which gets
+   `json.loads()`'d into a brand-new object. Unlike `agent_demo/agent_loop.py`
+   (where a nested call is actually executed, so the real object flows
+   into the outer call), nothing here ever hands the model a literal
+   Python reference to what a source produced — `id()`-based matching is
+   structurally blind to this.
+
+So `benchmarks/agentdojo_adapter.py`'s `ProvenanceGatedToolsExecutor` uses
+**content-based matching** instead: source-tool outputs are logged as
+`(content, origin)` pairs; a sink call is blocked if an argument value
+contains, or is contained in, previously-logged flagged content. Strictly
+weaker than object identity — it can miss a paraphrased value and could in
+principle false-positive on a coincidental substring — and that's a
+deliberate, documented tradeoff, not an oversight. `benchmarks/local_llm_patch.py`
+is a separate, unrelated fix: our local model reliably produces valid JSON
+tool calls but doesn't always close AgentDojo's `<function=...></function>`
+tag cleanly, so the parser was patched to bracket-match the JSON instead of
+relying on the closing tag — applied identically to both pipelines so it
+can't bias the comparison.
+
+**Honest current state**: the adapter is built and confirmed to work
+mechanically (`blocked=N` fires correctly on real runs). A complete,
+reportable comparative result does not exist yet — the first attempt
+(`Llama-3.2-3B-Instruct-4bit`) gave an inconclusive 0/0 on both metrics
+because the model wasn't capable enough to complete AgentDojo's
+precision-demanding banking tasks at all; a second attempt with a larger
+local model (`Qwen3-4B-4bit`, chosen because a 7B download didn't fit
+available disk space) was lost mid-run to a background-process
+interruption unrelated to the code itself, before finishing. Getting a
+complete result would need either a larger local model, a bigger sample,
+or real GPU compute (explored but not pursued, given the account/cost
+commitment it requires) — noted here rather than left as a silent gap.
+
 ## ADR-004: this project is one layer of a defense-in-depth stack, not the whole stack
 
 Everything above — `storage.py`/`rules.py`/`instrument.py` — operates at a
