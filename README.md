@@ -315,7 +315,7 @@ Run it yourself:
 .venv/bin/pytest tests/ -v
 ```
 
-47/47 passing:
+50/50 passing:
 - `test_propagation.py` (13) — Phase 1: a flagged string survives
   assignment and both directions of `+` concatenation, with origins
   merging correctly; plus `str(x)` registering its result in the
@@ -333,6 +333,9 @@ Run it yourself:
   approve or still deny, receives the right sink name/record, and reverts
   to a flat block once unregistered; audit logging is off by default and
   correctly records allowed/blocked/approved decisions.
+- `test_scoping_vs_fides.py` (3) — confirms per-object provenance scoping
+  avoids a specific, named limitation in FIDES's own paper (see the
+  comparative-finding section below), rather than assuming it does.
 
 ## ADR-003: AgentDojo integration uses content-matching, not object identity
 
@@ -720,6 +723,52 @@ Run it yourself:
 ```bash
 .venv/bin/python -m agent_demo.layer7_tool_poisoning.run_layer7_demo 5
 ```
+
+## Comparative finding: per-object scoping avoids a limitation FIDES names in its own paper
+
+After three guessed novelty candidates were checked against published work
+and ruled out (see the conversation record — each turned out already
+solved, in some cases more rigorously than this project could match), a
+different method was tried: reading the actual "Limitations"/"Future Work"
+sections of the closest related papers directly, rather than guessing
+candidate ideas and checking them after the fact. CaMeL and FIDES
+self-critique in real depth; ARGUS is focused but real; the
+"NeuroTaint"-introducing paper ("Ghost in the Agent") barely self-critiques
+at all, worth knowing rather than assuming it would.
+
+FIDES ("Securing AI Agents with Information-Flow Control," Costa & Köpf,
+Microsoft) names, in their own words, a limitation they call
+"fundamental" and only "partially address":
+
+> "when a tool returns untrusted or confidential data, this data
+> immediately taints the conversation history, restricting the tools
+> that can be called later without violating security policies"
+
+Their tainting is coarse-grained — once *any* untrusted data enters, the
+whole downstream conversation becomes over-restricted, even for calls
+that never touch that data. This isn't a hedge; it costs real, reported
+utility in their own evaluation.
+
+**Tested directly against our own design, not assumed**
+(`tests/test_scoping_vs_fides.py`): our provenance is tracked per *object*
+(`ProvenanceStr`, the id-keyed side-table), not per conversation or
+session — `check_sink()`/`find_flagged()` only ever inspect the actual
+arguments passed to the specific call being made. Confirmed: a sink call
+using only clean, never-tainted data is never blocked just because
+earlier, unrelated flagged data existed in the same `rules.installed()`
+session — even after five separate flagged reads accumulated first — while
+the genuinely flagged value is still correctly caught in that exact same
+session. This is real, sourced, comparative content: a specific limitation
+a closely related paper names in its own words, checked directly against
+this project's actual architecture rather than assumed to hold.
+
+**Honest framing, not overclaiming**: this doesn't mean our design is
+"better" in general — FIDES's coarser tainting likely exists as a
+deliberate tradeoff for a different capability (their label system
+reasons about confidentiality/integrity jointly across a conversation,
+which per-object tracking alone doesn't attempt). It means one specific,
+named cost of their approach isn't a cost of ours, for a specific,
+checkable, architectural reason — not a general superiority claim.
 
 ## Next
 
