@@ -127,6 +127,23 @@ class ProvenanceStr(str):
         merged = self._provenance.merge(get_provenance(other), step="concat(+)")
         return ProvenanceStr(result, merged)
 
+    def __str__(self) -> str:
+        # str(x) always calls type(x).__str__(x) per the data model, and it
+        # genuinely constructs a *new* plain str object -- confirmed
+        # empirically, `str.__str__(subclass_instance) is subclass_instance`
+        # is False. That's the exact mechanism that lets a flag silently
+        # vanish through code we don't control: found for real in
+        # GitPython's Git._unpack_args(), which does `str(arg)` on every
+        # command-line argument before building the subprocess call (see
+        # target/ in the README). Registering the new plain string in the
+        # side-table -- rather than trying to avoid creating one, which
+        # isn't possible, str's own contract requires returning a plain
+        # str -- closes this specific gap without changing what str(x)
+        # returns to unrelated callers.
+        result = str.__str__(self)
+        side_table.attach(result, self._provenance)
+        return result
+
     def __repr__(self) -> str:
         return (
             f"ProvenanceStr({str.__str__(self)!r}, "

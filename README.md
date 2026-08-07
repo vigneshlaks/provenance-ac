@@ -1,12 +1,14 @@
 # provenance-ac
 
-Status: **Phase 1 and Phase 2 complete**; both Incident A and Incident B
-(Phase 3) reconstructed against a real, local, unscripted model. Three
+Status: **Phase 1, Phase 2, and Phase 3 complete**; both Incident A and
+Incident B reconstructed against a real, local, unscripted model, and
+instrumentation run against a real, unmodified third-party project
+(`target/`), which surfaced two real propagation gaps — one fixed, one
+documented as a genuine, unfixable-in-general limitation. Three
 complementary defense-in-depth layers beyond the core system (audit
-logging, human oversight, OS-level sandboxing) added and verified. The
-third-party `target/` codebase run (rest of Phase 3) and Phase 4 (overhead
-measurement, final writeup) not started. This README documents the
-architecture decisions made so far.
+logging, human oversight, OS-level sandboxing) added and verified. Phase 4
+(overhead measurement, final writeup) not started. This README documents
+the architecture decisions made so far.
 
 ## ADR-001: instrumentation approach for assignment & concatenation
 
@@ -268,10 +270,11 @@ Run it yourself:
 .venv/bin/pytest tests/ -v
 ```
 
-39/39 passing:
-- `test_propagation.py` (11) — Phase 1: a flagged string survives
+40/40 passing:
+- `test_propagation.py` (12) — Phase 1: a flagged string survives
   assignment and both directions of `+` concatenation, with origins
-  merging correctly.
+  merging correctly; plus `str(x)` registering its result in the
+  side-table (added after target/ found this gap, ADR-005).
 - `test_enforcement.py` (9) — Phase 2 milestone: a hand-written script
   (file read → concat → `requests.post`) is blocked; the same script with
   an explicit `@sanitizer` step is allowed. Also covers `subprocess.run`
@@ -403,11 +406,80 @@ not assumed, and the verification changed the design:
   credentials-file exfiltration via `subpath` restriction — a real,
   working backstop with zero concept of "provenance."
 
+## ADR-005: target/ — real third-party code found two distinct gaps, one fixable, one not
+
+`target/mcp-server-git` is a real, unmodified, vendored copy of the
+official `mcp-server-git` reference server (from
+[modelcontextprotocol/servers](https://github.com/modelcontextprotocol/servers)),
+using GitPython to shell out to the real `git` binary. Picked over
+`mcp-server-fetch` deliberately: `fetch` uses `httpx.AsyncClient`
+exclusively, which we have zero coverage of (`rules.py` only wraps
+`requests`), so instrumenting it would trivially "not crash" while
+testing nothing real. GitPython genuinely calls `subprocess.Popen`
+internally — confirmed by reading its source before picking this target —
+so this actually exercises a function we wrap, through a real library we
+didn't write.
+
+**Milestone (runs without crashing): met.** `git_status()` on a real repo
+returns real output under `rules.installed()` with no error.
+
+**Then a real experiment**: tag a filename as flagged, pass it to
+`git_add()`, expect a block. It wasn't blocked. Tracing why surfaced two
+independent gaps, not one:
+
+**Gap 1 (fixed):** GitPython's own `Git._unpack_args()` calls `str(arg)`
+on every command-line argument before building the git command line.
+`str()` on a `ProvenanceStr` returns a plain, unflagged `str` — the exact
+mechanism documented all the way back in Phase 1's `storage.py` docstring,
+now confirmed actually biting inside real, unmodified third-party code
+exactly as §8 of the spec anticipated ("expect several [gaps] here").
+Fixed in `storage.py`: `ProvenanceStr.__str__` now registers the resulting
+plain string in the side-table before returning it — `str.__str__()`
+genuinely constructs a new object (confirmed: `str.__str__(x) is x` is
+`False` for a subclass instance), so there's no way to avoid creating one;
+the fix is making sure the new one is still tracked. Verified with a
+targeted test (`test_str_call_registers_result_in_side_table`) and by
+rerunning the exact `git_add` call that first exposed it.
+
+**Gap 2 (real, not fixable in our own code):** `git/cmd.py` does
+`from subprocess import Popen` at its own import time, and on non-Windows
+aliases `safer_popen = Popen` directly. If `git` gets imported before
+`rules.install()` ever runs — which is how most real programs are
+naturally structured, imports at the top of the file — `git.cmd.Popen`
+stays bound to the *original*, unpatched class forever. Reassigning
+`subprocess.Popen` afterward doesn't reach it: confirmed directly,
+`git.cmd.Popen is original_popen` stays `True` even after `install()`
+runs. This is fundamental to how Python's `from X import Y` works (it
+copies a reference, decoupled from the source module after that point),
+not a bug in our wrapping logic — no code change in `rules.py` fixes it in
+general. The one real mitigation is operational: call `rules.install()`
+before importing any target code, never after. `target/run_target_test.py`
+demonstrates both orderings side by side, in genuinely separate
+subprocesses (a single-process test would risk the second scenario
+silently running against an already-`sys.modules`-cached import from the
+first, testing a false premise) — confirmed: install-before-import blocks
+correctly, install-after-import doesn't, on the identical call.
+
+**Practical implication, stated plainly rather than left implicit**: this
+means the safety guarantee this whole project provides has an ordering
+precondition that's easy to get wrong silently — nothing crashes or warns
+if `rules.install()` runs after the code it's supposed to be watching has
+already imported its own references to `open`/`requests.post`/`subprocess.Popen`.
+Real deployment of something like this would need to enforce
+install-first at the entry point, not just document it.
+
+Run it yourself:
+
+```bash
+.venv/bin/python target/run_target_test.py
+```
+
 ## Next
 
 - Layer 7 (supply-chain/tool-poisoning): a tool whose *description* lies
   about what it does, showing content-blind enforcement still catches the
   real runtime behavior regardless of advertised metadata. Not built yet.
-- Select a real, small, third-party open-source Python project for
-  `target/` and run instrumentation against it without crashing.
-- Phase 4: overhead measurement and the final writeup.
+- Phase 4: overhead measurement and the final writeup, including
+  consolidating the scattered per-ADR limitations into one dedicated
+  section and writing the single falsifiable claim paragraph the spec
+  asks for.

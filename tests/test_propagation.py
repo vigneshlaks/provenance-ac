@@ -111,3 +111,19 @@ def test_call_event_hook_fires():
         stop()
 
     assert seen == [41]
+
+
+def test_str_call_registers_result_in_side_table():
+    """str(x) always constructs a genuinely new plain str object (confirmed
+    empirically: `str.__str__(subclass_instance) is subclass_instance` is
+    False), so it can't just "not strip" the flag -- there's no way to
+    return self and still honor str's own contract of returning a plain
+    str. Found this biting for real in target/: GitPython's own
+    Git._unpack_args() calls str(arg) on every command-line argument
+    before building a subprocess call. The fix is registering the new
+    result in the side-table rather than trying to avoid creating one."""
+    a = make_flagged("hello")
+    result = str(a)
+    assert type(result) is str
+    assert is_flagged(result)
+    assert get_provenance(result).origins == ("file:/tmp/secret.txt",)
