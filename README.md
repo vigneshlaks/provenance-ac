@@ -1,7 +1,9 @@
 # provenance-ac
 
 Status: **Phase 1 and Phase 2 complete**; both Incident A and Incident B
-(Phase 3) reconstructed against a real, local, unscripted model. The
+(Phase 3) reconstructed against a real, local, unscripted model. Three
+complementary defense-in-depth layers beyond the core system (audit
+logging, human oversight, OS-level sandboxing) added and verified. The
 third-party `target/` codebase run (rest of Phase 3) and Phase 4 (overhead
 measurement, final writeup) not started. This README documents the
 architecture decisions made so far.
@@ -266,7 +268,7 @@ Run it yourself:
 .venv/bin/pytest tests/ -v
 ```
 
-30/30 passing:
+39/39 passing:
 - `test_propagation.py` (11) — Phase 1: a flagged string survives
   assignment and both directions of `+` concatenation, with origins
   merging correctly.
@@ -278,9 +280,82 @@ Run it yourself:
 - `test_agent_loop.py` (10) — the agent's tool-call parsing/dispatch
   mechanism, independent of model behavior, including both incidents'
   blocking behavior at the deterministic level.
+- `test_layers.py` (9) — layers 8 and 9 (below): the approval hook can
+  approve or still deny, receives the right sink name/record, and reverts
+  to a flat block once unregistered; audit logging is off by default and
+  correctly records allowed/blocked/approved decisions.
+
+## ADR-004: this project is one layer of a defense-in-depth stack, not the whole stack
+
+Everything above — `storage.py`/`rules.py`/`instrument.py` — operates at a
+single layer: **application data flow**. It tracks whether a specific
+Python value traces to an untrusted origin, and gates specific declared
+sinks. That's a real, narrower thing than "AI agent security" as a whole,
+and it's worth being explicit about what it does and doesn't cover rather
+than let the scope blur.
+
+A real incident chain (multi-tenancy leak → SSRF → broken auth → privilege
+escalation → RCE) makes the boundary concrete: **none of those steps route
+through a Python function this project wraps**, so this system would catch
+essentially none of that chain — it's an infrastructure/network/auth-layer
+problem, not a data-flow-through-an-agent's-own-tool-calls problem. Where
+this project's layer earns its place is the complementary, narrower
+failure mode infra-layer controls are structurally unable to catch: a
+properly sandboxed, properly authenticated agent, using its own authorized
+tools, still misled by content into misusing a capability it's genuinely
+allowed to use (exactly Incident B's real point — the destination
+`api.anthropic.com` was never illegitimate; the credential's origin is
+what mattered, and no destination-based control could see that).
+
+Three more layers were added as a deliberate, verified (not just
+asserted) demonstration of this:
+
+**Layer 9 (audit logging, `provenance/audit_log.py`)** — off by default;
+`set_log_path()` enables JSON-lines logging of every sink decision
+(allowed/blocked/approved). Uses a pristine `open()` reference captured at
+its own import time, before `rules.install()` ever runs — the same
+reentrancy concern as `instrument.py`'s ADR-002: if the log write itself
+went through the *patched* `open()`, and the log path were outside the
+configured workspace, that write would trigger the workspace-boundary
+sink check, which would try to audit-log *that* decision too. Logging
+infrastructure must not be subject to the mechanism it's logging about.
+
+**Layer 8 (human oversight, `rules.set_approval_hook()`)** — a registered
+callback can approve a call that would otherwise be blocked, instead of a
+flat deny (the same shape as APPA's "remedy plans"). Off by default; with
+no hook registered, behavior is unchanged from before this existed. Scoped
+deliberately to interactive use — AgentDojo-style batch evaluation has no
+human present, so this isn't wired into the benchmark path.
+
+**Layer 4 (OS-level sandboxing, `layers/sandbox_demo.py`)** — verified,
+not assumed, and the verification changed the design:
+- `sandbox-exec` is deprecated by Apple (confirmed via its own man page:
+  "DEPRECATED... adopt App Sandbox instead") but still functional on this
+  system (macOS 26.5).
+- **Per-destination network filtering does not work on this macOS
+  version** — `(remote ip "host:port")` errors with `"host must be * or
+  localhost"`. So this tool can only do blanket allow/deny of all network
+  egress, not "allow this destination, block that one" — genuine
+  destination-selective filtering would need a real firewall (`pfctl`) or
+  a filtering proxy, neither built here. This is a real capability gap
+  between the OS-level tool and the app-layer sinks, worth stating
+  plainly rather than glossing over.
+- Filesystem path scoping **does** work with real granularity — confirmed
+  with a working subpath-deny rule. Caught one genuine gotcha along the
+  way: macOS resolves `/tmp` to `/private/tmp` (and `tempfile`'s default
+  directory similarly), so a profile path must be the *resolved* path or
+  the deny rule silently no-ops — confirmed this the hard way when a
+  first attempt let the "blocked" write through.
+- The demo simulates app-layer provenance being bypassed entirely (no
+  `rules.py` involved at all) and shows the sandbox independently stops a
+  credentials-file exfiltration via `subpath` restriction — a real,
+  working backstop with zero concept of "provenance."
 
 ## Next
 
+- Layer 7 (supply-chain/tool-poisoning): a tool whose *description* lies
+  about what it does, showing content-blind enforcement still catches the
+  real runtime behavior regardless of advertised metadata. Not built yet.
 - Select a real, small, third-party open-source Python project for
   `target/` and run instrumentation against it without crashing.
 - Phase 4: overhead measurement and the final writeup.

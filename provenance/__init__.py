@@ -1,5 +1,6 @@
+from . import audit_log
 from .exceptions import ProvenanceViolation
-from .rules import installed, install, sanitizer, set_workspace, uninstall
+from .rules import installed, install, sanitizer, set_approval_hook, set_workspace, uninstall
 from .storage import (
     ProvenanceDict,
     ProvenanceRecord,
@@ -14,11 +15,13 @@ __all__ = [
     "ProvenanceRecord",
     "ProvenanceStr",
     "ProvenanceViolation",
+    "audit_log",
     "get_provenance",
     "install",
     "installed",
     "is_flagged",
     "sanitizer",
+    "set_approval_hook",
     "set_workspace",
     "side_table",
     "uninstall",

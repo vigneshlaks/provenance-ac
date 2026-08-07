@@ -21,6 +21,7 @@ import pathlib
 import subprocess
 from typing import Any, Callable, Iterator
 
+from . import audit_log
 from .exceptions import ProvenanceViolation
 from .storage import ProvenanceDict, ProvenanceRecord, ProvenanceStr, get_provenance, side_table
 
@@ -84,10 +85,34 @@ def find_flagged(*args: Any, **kwargs: Any) -> tuple[Any, "ProvenanceRecord | No
     return None, None
 
 
+ApprovalHook = Callable[[str, Any, ProvenanceRecord], bool]
+
+_approval_hook: "ApprovalHook | None" = None
+
+
+def set_approval_hook(hook: "ApprovalHook | None") -> None:
+    """Layer 8 (human oversight): register a callback invoked when a sink
+    call would otherwise be blocked, so a human (or an explicit policy) can
+    approve it instead of a flat deny. `hook(sink_name, value, record)` ->
+    bool; returning True approves the call (it proceeds as if unflagged),
+    False denies it (same as no hook). Opt-in and off by default -- with no
+    hook registered, behavior is identical to before this existed: a flat
+    block. Pass None to unregister.
+    """
+    global _approval_hook
+    _approval_hook = hook
+
+
 def check_sink(sink_name: str, *args: Any, **kwargs: Any) -> None:
     value, record = find_flagged(*args, **kwargs)
-    if value is not None:
-        raise ProvenanceViolation(sink_name, record.origins, record.chain)
+    if value is None:
+        audit_log.record(sink_name, "allowed")
+        return
+    if _approval_hook is not None and _approval_hook(sink_name, value, record):
+        audit_log.record(sink_name, "approved", record.origins, record.chain)
+        return
+    audit_log.record(sink_name, "blocked", record.origins, record.chain)
+    raise ProvenanceViolation(sink_name, record.origins, record.chain)
 
 
 # --------------------------------------------------------------------------
