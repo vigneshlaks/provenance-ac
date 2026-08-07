@@ -66,6 +66,18 @@ class _IdSideTable:
     not created through a wrapper type. See ADR-001 above for why this is a
     plain dict rather than a real WeakValueDictionary, and the id-reuse risk
     that follows from that.
+
+    Confirmed for real, not just theoretically, via ADR-006 (README):
+    `rules.uninstall()` does NOT clear this table -- it only restores the
+    patched functions. So the table accumulates for the entire process
+    lifetime by default, across every `installed()`/`uninstall()` cycle,
+    not just within one. Running many short-lived operations in a tight
+    loop (exactly what benchmarks/overhead_measurement.py does) is exactly
+    the condition that makes a later object's id() likely to collide with
+    an earlier, already-deleted one -- and it did, causing a real false
+    positive during that benchmark. `clear_all()` exists for exactly this:
+    resetting between independent runs/benchmark repetitions so stale
+    entries from a finished, unrelated run can't leak into the next one.
     """
 
     def __init__(self) -> None:
@@ -79,6 +91,9 @@ class _IdSideTable:
 
     def clear(self, value: Any) -> None:
         self._table.pop(id(value), None)
+
+    def clear_all(self) -> None:
+        self._table.clear()
 
     def __len__(self) -> int:
         return len(self._table)

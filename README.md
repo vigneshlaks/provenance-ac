@@ -1,14 +1,57 @@
 # provenance-ac
 
-Status: **Phase 1, Phase 2, and Phase 3 complete**; both Incident A and
-Incident B reconstructed against a real, local, unscripted model, and
-instrumentation run against a real, unmodified third-party project
-(`target/`), which surfaced two real propagation gaps — one fixed, one
-documented as a genuine, unfixable-in-general limitation. Three
-complementary defense-in-depth layers beyond the core system (audit
-logging, human oversight, OS-level sandboxing) added and verified. Phase 4
-(overhead measurement, final writeup) not started. This README documents
-the architecture decisions made so far.
+## The claim
+
+This project makes one narrow, falsifiable claim, not a general security
+product claim: **for the v1 rule set implemented here — sinks are
+`requests.get`/`post`, `subprocess.run`/`Popen`, and file writes outside a
+declared workspace; sources are file reads, network responses, and
+subprocess output — a value that reaches one of those sinks via an
+*explicit* data-flow path (assignment, `+` concatenation, dict/list
+construction, or `str()`) from one of those sources will be blocked unless
+it has passed through an explicitly declared `@sanitizer`.** It is
+falsifiable in a direct, specific way: produce a value that provably
+travels one of those covered paths from a source to a sink, was never
+sanitized, and is *not* blocked — that disproves the claim as stated.
+The claim does **not** extend to implicit/control-flow leaks (§7, out of
+scope by design — see Limitations), values that lose their flag via an
+unwrapped string method or a C-extension boundary (documented, unfixed
+gaps), or any protection once target code has already imported its own
+reference to a wrapped function before `rules.install()` runs (ADR-005).
+
+This responds directly to Anthropic's May 25, 2026 engineering
+retrospective, ["How we contain Claude across products"](https://www.anthropic.com/engineering/how-we-contain-claude)
+(McGuinness, Grace, De Jonghe, Eaton, Ribbink) — Incident A and Incident B
+below are concrete reconstructions of the two incidents that article
+describes (credential phishing via prompt injection, and an API-allowlist
+being treated as a destination filter rather than a capability grant),
+run against a real, local, unscripted model rather than a scripted repro.
+
+## Architecture, in brief
+
+Three layers do the actual work, each documented in depth in its own ADR
+below: **`storage.py`** labels a value either as a real attribute on a
+`ProvenanceStr`/`ProvenanceDict` wrapper (for values we create ourselves)
+or in an id-keyed side-table (for plain primitives that can't hold an
+attribute) — see ADR-001 for why assignment and `+` needed no bytecode
+hooking at all, and ADR-006 for the real, confirmed id-reuse risk that
+comes with the side-table half of this design. **`rules.py`** enforces the
+v1 rule set by directly wrapping the target callables (`open`,
+`requests.get`/`post`, `subprocess.run`/`Popen`) rather than using
+`sys.monitoring`'s `CALL` event — see ADR-002 for why. **`instrument.py`**
+sets up real, working `sys.monitoring` `CALL`-event plumbing that isn't
+the enforcement mechanism (ADR-002 again) but remains available for
+coverage/observability use. Three further layers (audit logging, human
+oversight, OS-level sandboxing — ADR-004) and an external benchmark
+integration (ADR-003) sit alongside the core system, each with its own
+documented, verified scope.
+
+Status: **Phases 1 through 4 complete.** Both Incident A and Incident B
+reconstructed against a real, local, unscripted model; instrumentation run
+against a real, unmodified third-party project (`target/`), which
+surfaced two real propagation gaps — one fixed, one documented as
+genuinely unfixable in our own code; three complementary defense-in-depth
+layers built and verified; real, measured overhead reported (ADR-006).
 
 ## ADR-001: instrumentation approach for assignment & concatenation
 
@@ -474,12 +517,177 @@ Run it yourself:
 .venv/bin/python target/run_target_test.py
 ```
 
+## ADR-006: Phase 4 — the id-reuse risk stopped being theoretical, and the real overhead number
+
+While building `benchmarks/overhead_measurement.py` (a tight loop of real
+git operations, repeated many times, exactly what a fair overhead
+measurement needs), the id-reuse risk `storage.py` has documented as
+*theoretical* since Phase 1 actually fired for real — a `ProvenanceViolation`
+was raised citing an origin path from a **different, already-deleted temp
+directory** than the one being operated on. Root cause, confirmed directly:
+`rules.uninstall()` only restores the patched functions — it never clears
+`storage.side_table`, which is process-global. Across 22 `run_once()` calls
+in one process, a later run's short-lived string/bytes object landed at the
+same memory address as an already-deleted object from an earlier, unrelated
+run, and the stale entry was misread as still valid. This is precisely the
+risk the Phase 1 docstring named and never got to observe until a workload
+was actually structured to stress it (many short-lived objects, tight
+loop) — confirming a documented risk empirically, rather than leaving it
+as an assumption, is exactly the discipline this project has tried to hold
+throughout.
+
+Two real fixes, not a workaround: `set_workspace()` needed to be called
+with the actual repo path (it defaulted to CWD, so git's own internal
+bookkeeping writes looked like they were "outside the workspace" and got
+needlessly flagged), and `side_table.clear_all()` — a genuinely new,
+previously-missing piece of public API — now lets independent runs reset
+the table between them, closing the specific id-collision window that
+caused the false positive. Both are in `provenance/storage.py` and
+`benchmarks/overhead_measurement.py`; the bug and the fix are both
+directly reproducible.
+
+**Real, measured overhead** (spec §8: "report the real multiplier, not an
+estimate"), 11 repetitions × 20 workload cycles each (write file → add →
+commit → diff → add → commit → status → log; fresh temp repo per
+repetition, median reported since it's robust to occasional scheduling
+noise a mean isn't):
+
+```
+Baseline (no instrumentation):     median=1.2063s
+Instrumented (rules.installed()):  median=1.2204s
+Real measured overhead multiplier: 1.012x  (+1.2%)
+```
+
+Honest caveat, not a footnote to skip: this workload is **subprocess-dominated**
+— 6 real `git` process spawns per cycle. The actual git binary's execution
+cost swamps our per-call Python-level check, so this number mostly measures
+"how expensive is spawning git," not "how expensive is our instrumentation."
+A workload with many pure-Python operations and few real subprocess/network
+calls would have less real work to amortize the check against, and could
+show meaningfully higher relative overhead than this number suggests. This
+result is real and reproducible, but it should not be read as "instrumentation
+is free" in general — only that it's negligible *for this specific,
+subprocess-heavy workload*.
+
+Run it yourself:
+
+```bash
+.venv/bin/python -m benchmarks.overhead_measurement
+```
+
+## Limitations
+
+Every item below is either something the spec deliberately scoped out, or
+something we found and verified rather than assumed. Grouped by kind, most
+fundamental first.
+
+**By design, not a bug (spec §7):**
+- **Implicit/control-flow leaks are entirely untracked.**
+  `if flagged_secret == guess: send(guess)` — `guess` never directly
+  derives from `flagged_secret`, so nothing propagates, yet the secret
+  leaks via timing/behavior. This is a standard, acknowledged gap in
+  dynamic explicit-flow tracking generally (the same boundary tools like
+  TaintCheck/libdft accept), not a flaw unique to this implementation.
+
+**Known propagation gaps, confirmed empirically, one fixed:**
+- **`str(x)` on a `ProvenanceStr` used to silently drop the flag** —
+  confirmed in Phase 1, confirmed biting for real inside GitPython's own
+  argument-normalization code (ADR-005), now **fixed**:
+  `ProvenanceStr.__str__` registers the resulting plain string in the
+  side-table.
+- **Most other string methods still drop the flag** — `.upper()`,
+  `.split()`, `.join()`, slicing all return a plain, unflagged `str`. Only
+  `+`/`__radd__` and now `__str__` are overridden; `.upper()` etc. are not.
+- **f-string interpolation always drops the flag**, regardless of what
+  `__format__` returns — `BUILD_STRING` coerces to plain `str`
+  unconditionally; confirmed empirically, not fixable by overriding a
+  dunder.
+- **Function-call return values don't inherit provenance from their
+  arguments.** §6's conservative default (any flagged arg → flagged
+  return) was never implemented — a custom function or `.format()` call
+  that transforms flagged data currently launders it completely.
+- **Opaque C-extension boundaries lose the flag silently** — `json.loads()`/
+  `json.dumps()` being the common case. Explicitly out of v1 scope (§6),
+  but practically significant since JSON is everywhere in exactly the code
+  this targets.
+
+**Real correctness risks, not just missing features:**
+- **The id-keyed side-table can produce false positives, and this is no
+  longer theoretical** — confirmed directly in ADR-006: `rules.uninstall()`
+  never clears it, so it accumulates for the process lifetime, and a tight
+  loop of short-lived objects can produce a genuine `id()` collision with
+  an already-deleted, unrelated entry. `side_table.clear_all()` exists as
+  a mitigation for independent runs, but the underlying accumulation-over-
+  process-lifetime behavior is the default, not something callers are
+  warned about automatically.
+- **Sanitizers are trusted, not verified.** `@sanitizer` just clears the
+  flag on return — nothing checks the function actually does anything. A
+  no-op or buggy "sanitizer" silently defeats the entire system.
+- **Enforcement only covers code paths that go through the patched
+  functions, and *when* they were patched matters** — confirmed directly
+  in ADR-005 (gap 2): if target code does `from subprocess import Popen`
+  (or similar) *before* `rules.install()` ever runs, that reference is
+  permanently decoupled from our patch, with no crash or warning. The only
+  mitigation is operational (install before importing target code), not a
+  code fix — this is fundamental to how Python's `from X import Y` works.
+  Separately, anything that never goes through a wrapped function at all
+  (raw sockets, `urllib`, `smtplib`, `os.system`, an async HTTP client like
+  `httpx`) bypasses detection completely — confirmed concretely when
+  `mcp-server-fetch` was ruled out as a `target/` candidate specifically
+  because it uses `httpx.AsyncClient` exclusively.
+- **The AgentDojo integration (ADR-003) uses content-matching, a strictly
+  weaker guarantee than the object-identity tracking used everywhere
+  else** — it can miss a value the model paraphrased rather than copied,
+  and could in principle false-positive on a coincidental substring match.
+  This was a forced tradeoff, not a choice: object identity doesn't
+  survive AgentDojo's harness at all (every value round-trips through the
+  model's own text generation).
+- **The OS-level sandbox demo (ADR-004) cannot do destination-selective
+  network filtering** — confirmed directly: `sandbox-exec`'s
+  `(remote ip "host:port")` only accepts `*` or `localhost` on this macOS
+  version, so it can only do blanket allow/deny of all network egress.
+  Genuine per-destination filtering (which our own app-layer sinks *can*
+  do) would need a real firewall (`pfctl`) or a filtering proxy, neither
+  built here.
+
+**Untested, not proven either way:**
+- **This project is one layer of a defense-in-depth stack, not the whole
+  stack (ADR-004).** A real incident chain built from infrastructure/
+  network/auth-layer failures (multi-tenancy leak → SSRF → broken auth →
+  privilege escalation → RCE) would route through essentially none of what
+  this system watches — it's a different, narrower failure mode
+  (content-driven misuse of an already-authorized capability) than
+  infrastructure-layer compromise.
+- **The three incident/target demos used one small, quantized local model
+  and one real third-party project.** They show *that* susceptibility and
+  *that* propagation gap are real — they say nothing about whether a
+  stronger model, a different codebase, or an attacker deliberately
+  targeting the known gaps above (e.g. laundering data through `.upper()`
+  on purpose) would succeed differently.
+- **The overhead measurement (ADR-006) is workload-specific.** 1.012x was
+  measured on a subprocess-dominated workload; a pure-Python-heavy
+  workload with few real subprocess/network calls was not measured and
+  could show meaningfully higher relative overhead.
+
+**Narrow by scope, not by mistake:**
+- The v1 sink list is exactly three things. Real exfiltration paths
+  outside that list (raw sockets, `urllib`, `smtplib`, direct syscalls)
+  aren't covered at all, and this is deliberate v1 scope, not an oversight.
+
 ## Next
+
+All four spec phases and the success criteria in §9 are complete. What's
+left is optional, beyond-spec work, not required for the project as
+originally scoped:
 
 - Layer 7 (supply-chain/tool-poisoning): a tool whose *description* lies
   about what it does, showing content-blind enforcement still catches the
   real runtime behavior regardless of advertised metadata. Not built yet.
-- Phase 4: overhead measurement and the final writeup, including
-  consolidating the scattered per-ADR limitations into one dedicated
-  section and writing the single falsifiable claim paragraph the spec
-  asks for.
+- Closing specific propagation gaps from the Limitations section above
+  (`.upper()`/`.split()`/`.join()` re-wrapping, function-call return-value
+  inheritance per §6 item 3) if the project continues past this point.
+- Novelty exploration (see the earlier conversation record): three
+  candidate research angles were checked against current published work
+  and ruled out honestly rather than claimed; a more rigorous approach
+  (reading the actual limitations/future-work sections of the closest
+  papers, rather than guessing candidates) was proposed but not started.

@@ -93,6 +93,25 @@ def test_side_table_tracks_plain_primitives():
     assert not is_flagged(plain)
 
 
+def test_side_table_clear_all():
+    """ADR-006: uninstall() does not clear the side-table -- it accumulates
+    for the whole process lifetime by default. clear_all() exists so
+    independent runs (e.g. benchmark repetitions) can reset it, closing the
+    id()-reuse window between them."""
+    from provenance.storage import side_table
+
+    a = "first value"
+    b = "second value"
+    side_table.attach(a, ProvenanceRecord(origins=("file:a.txt",)))
+    side_table.attach(b, ProvenanceRecord(origins=("file:b.txt",)))
+    assert len(side_table) >= 2
+
+    side_table.clear_all()
+    assert len(side_table) == 0
+    assert not is_flagged(a)
+    assert not is_flagged(b)
+
+
 def test_call_event_hook_fires():
     seen = []
 
