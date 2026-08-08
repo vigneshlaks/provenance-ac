@@ -10,6 +10,7 @@ import responses
 from agent_demo.agent_loop import (
     TOOL_DESCRIPTIONS,
     ToolCallError,
+    _get_model,
     _looks_like_bare_tool_call,
     parse_and_run_tool,
     tool_debug_log,
@@ -19,6 +20,7 @@ from agent_demo.agent_loop import (
 )
 from provenance import rules, sanitizer
 from provenance.exceptions import ProvenanceViolation
+from provenance.storage import ProvenanceRecord, ProvenanceStr, is_flagged
 
 
 def test_simple_tool_call_dispatches(tmp_path):
@@ -251,3 +253,35 @@ def test_bare_call_not_recognized_for_unknown_name():
 def test_plain_prose_not_recognized_as_a_call():
     tools = {"read_file": tool_read_file}
     assert not _looks_like_bare_tool_call("I have completed the task.", tools)
+
+
+# --------------------------------------------------------------------------
+# Delegation boundary (see agent_demo/delegation_boundary/): the core,
+# structural claim behind that experiment, tested directly and fast here
+# rather than only via the live multi-agent run. tokenizer.apply_chat_template
+# is real, third-party code -- confirmed empirically, not assumed, that it
+# returns a list of token IDs, not a string, which is what destroys a
+# ProvenanceStr's tag before a sub-agent's generation even starts.
+# --------------------------------------------------------------------------
+
+def test_chat_template_tokenizes_immediately_destroying_the_tag():
+    flagged = ProvenanceStr("secret content", ProvenanceRecord(origins=("file:secret.txt",)))
+    assert is_flagged(flagged)
+
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": flagged},
+    ]
+    # Ordinary Python semantics preserve the tag up to this point -- same
+    # "labels not boxes" principle as everywhere else in this project.
+    assert is_flagged(messages[1]["content"])
+
+    _, tokenizer = _get_model()
+    prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+
+    # The real finding: this is a list of integers, not a string. There is
+    # no Python-level object here a tag could survive on even in
+    # principle -- confirmed, not a string-formatting quirk like the
+    # str()/GitPython gap (ADR-005), a structurally earlier and harder wall.
+    assert isinstance(prompt, list)
+    assert all(isinstance(tok, int) for tok in prompt)
