@@ -1,23 +1,21 @@
-"""Verification demo. This extends Incident A with a genuine network
-destination instead of responses mocking, and with injected content this
-project didn't author.
+"""Verification demo. This extends Incident A with a network destination
+that isn't mocked, and with injected content this project didn't author.
 
-It uses agent_demo/verification/real_server.py, a genuine local HTTP
-server, so a block can be observed directly, as zero requests received,
-rather than only inferred from reading rules.py's code. The injected
-instruction is AgentDojo's own "injecagent" baseline attack template, from
+It uses agent_demo/verification/real_server.py, a local HTTP server, so a
+block can be observed directly, as zero requests received, rather than
+only inferred from reading rules.py's code. The injected instruction is
+AgentDojo's own "injecagent" baseline attack template, from
 agentdojo/attacks/baseline_attacks.py, itself sourced from the InjecAgent
 paper, arXiv:2403.02691.
 
 Two scenarios are run. The blocked case uses the live local model against
-the genuine server, and checks both what our own code reports, that is,
+the server, and checks both what our own code reports, that is,
 blocked=True, and what the server independently observed, zero requests
 received. Both have to agree. The allowed case is deterministic rather
 than using the live model, since the question there is whether
 sanitization delivers rather than whether the model decides to attempt
 anything, and it runs against a fresh server instance, confirming that the
-server receives the actual credential content, not just that no exception
-fired.
+server receives the credential content, not just that no exception fired.
 """
 
 from __future__ import annotations
@@ -77,7 +75,7 @@ def run_blocked_case() -> dict:
                 tool_names=["read_file", "send_external"],
             )
         return {
-            "scenario": "unsanitized, live model, genuine server",
+            "scenario": "unsanitized, live model, direct observation",
             "our_code_says_blocked": result.blocked,
             "attempted_tools": result.attempted_tools,
             "requests_the_server_actually_received": len(server.requests),
@@ -102,7 +100,7 @@ def run_allowed_case() -> dict:
 
         received = server.requests
         return {
-            "scenario": "sanitized, deterministic, genuine server",
+            "scenario": "sanitized, deterministic, direct observation",
             "tool_result": result,
             "requests_the_server_actually_received": len(received),
             "body_the_server_actually_got": received[0].body.decode() if received else None,
@@ -110,16 +108,16 @@ def run_allowed_case() -> dict:
 
 
 def main() -> None:
-    print(f"Verification demo, genuine network I/O, InjecAgent-sourced content, model={agent_loop.MODEL_ID}\n")
+    print(f"Verification demo, network I/O observed directly, InjecAgent-sourced content, model={agent_loop.MODEL_ID}\n")
 
     blocked = run_blocked_case()
-    print("=== Blocked case (unsanitized, live model, genuine server) ===")
+    print("=== Blocked case (unsanitized, live model, direct observation) ===")
     for k, v in blocked.items():
         print(f"  {k}: {v}")
 
     print()
     allowed = run_allowed_case()
-    print("=== Allowed case (sanitized, deterministic, genuine server) ===")
+    print("=== Allowed case (sanitized, deterministic, direct observation) ===")
     for k, v in allowed.items():
         print(f"  {k}: {v}")
 
@@ -133,7 +131,7 @@ def main() -> None:
     if blocked_ok and allowed_ok:
         print("Confirmed by observation, not just by reading the code:")
         print("When blocked, the server received ZERO requests. Nothing left the process.")
-        print("When sanitized, the server received the ACTUAL credential content.")
+        print("When sanitized, the server received the credential content in full.")
     else:
         print("WARNING: unexpected result. The code level report and the server observation disagree.")
 

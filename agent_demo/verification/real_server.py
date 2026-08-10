@@ -1,16 +1,16 @@
-"""A genuine, local HTTP server for verification. This is not a mock.
+"""A local HTTP server for verification. This is not a mock.
 
 Every other demo uses responses.RequestsMock(), which fakes the network
 layer inside the requests library before any socket actually opens. That's
 fine for repeatable testing, but it means no other demo actually observes
-a request get sent or genuinely fail to leave the process. The claim that
-a block means zero bytes leave is a property of rules.py's code, since
+a request being sent, or failing to leave the process. The claim that a
+block means zero bytes leave is a property of rules.py's code, since
 check_sink raises before the wrapped function runs, but it isn't something
 watched happening.
 
-This is a genuine socket and a genuine HTTP server on loopback. It's safe
-to run because we own both ends. Nothing here talks to an actual third
-party.
+This is a socket and an HTTP server running on loopback, not simulated in
+any way. It's safe to run because we own both ends. Nothing here talks to
+a third party outside this process.
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ class RecordedRequest:
 
 
 class RecordingHTTPServer:
-    """Starts a genuine HTTP server on a free localhost port, in a
-    background thread, recording every request it genuinely receives."""
+    """Starts an HTTP server on a free localhost port, in a background
+    thread, recording every request it receives."""
 
     def __init__(self) -> None:
         self.requests: list[RecordedRequest] = []
