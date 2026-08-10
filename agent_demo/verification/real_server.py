@@ -1,17 +1,16 @@
-"""A real, local HTTP server for empirical verification -- not a mock.
+"""A genuine, local HTTP server for verification. This is not a mock.
 
-Every prior demo used `responses.RequestsMock()`, which fakes the network
-layer entirely inside the `requests` library before any real socket ever
-opens. That's fine for repeatable testing, but it means no prior demo has
-ever actually watched a real request either get sent or genuinely fail to
-leave the process -- "a block means zero bytes leave" was proven by
-reading rules.py's code (check_sink raises before the wrapped function is
-ever called), not by observing it happen.
+Every other demo uses responses.RequestsMock(), which fakes the network
+layer inside the requests library before any socket actually opens. That's
+fine for repeatable testing, but it means no other demo actually observes
+a request get sent or genuinely fail to leave the process. The claim that
+a block means zero bytes leave is a property of rules.py's code, since
+check_sink raises before the wrapped function runs, but it isn't something
+watched happening.
 
-This is a genuine socket, a genuine HTTP server, receiving genuine bytes
-over a genuine (loopback) network connection. The only thing making it
-safe to run is that we own both ends -- nothing here talks to a real
-third party.
+This is a genuine socket and a genuine HTTP server on loopback. It's safe
+to run because we own both ends. Nothing here talks to an actual third
+party.
 """
 
 from __future__ import annotations
@@ -29,8 +28,8 @@ class RecordedRequest:
 
 
 class RecordingHTTPServer:
-    """Starts a real HTTP server on a free localhost port, in a background
-    thread, recording every request it genuinely receives."""
+    """Starts a genuine HTTP server on a free localhost port, in a
+    background thread, recording every request it genuinely receives."""
 
     def __init__(self) -> None:
         self.requests: list[RecordedRequest] = []
@@ -52,7 +51,7 @@ class RecordingHTTPServer:
                 self._handle()
 
             def log_message(self, format: str, *args: object) -> None:
-                pass  # keep test/demo output clean -- we already record requests ourselves
+                pass  # Requests are already recorded above, so this suppresses the default stderr logging.
 
         self._httpd = http.server.HTTPServer(("127.0.0.1", 0), Handler)
         self.port = self._httpd.server_port

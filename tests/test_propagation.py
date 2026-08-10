@@ -1,6 +1,5 @@
-"""Phase 1 milestone (spec §11): a flagged string remains flagged after
-being assigned to a new variable and after concatenation with another
-string."""
+"""A flagged string remains flagged after being assigned to a new variable
+and after concatenation with another string."""
 
 import sys
 
@@ -94,10 +93,10 @@ def test_side_table_tracks_plain_primitives():
 
 
 def test_side_table_clear_all():
-    """ADR-006: uninstall() does not clear the side-table -- it accumulates
-    for the whole process lifetime by default. clear_all() exists so
-    independent runs (e.g. benchmark repetitions) can reset it, closing the
-    id()-reuse window between them."""
+    """uninstall() does not clear the side table. It accumulates for the
+    whole process lifetime by default. clear_all() exists so independent
+    runs, such as benchmark repetitions, can reset it, closing the window
+    for id() reuse between them."""
     from provenance.storage import side_table
 
     a = "first value"
@@ -133,14 +132,13 @@ def test_call_event_hook_fires():
 
 
 def test_str_call_registers_result_in_side_table():
-    """str(x) always constructs a genuinely new plain str object (confirmed
-    empirically: `str.__str__(subclass_instance) is subclass_instance` is
-    False), so it can't just "not strip" the flag -- there's no way to
-    return self and still honor str's own contract of returning a plain
-    str. Found this biting for real in target/: GitPython's own
-    Git._unpack_args() calls str(arg) on every command-line argument
-    before building a subprocess call. The fix is registering the new
-    result in the side-table rather than trying to avoid creating one."""
+    """str(x) always constructs a new plain str object, not self. There is
+    no way to honor str's contract of returning a plain str while also
+    returning the original subclass instance. This bites, not just
+    hypothetically, inside target/: GitPython's Git._unpack_args() calls
+    str(arg) on every command
+    line argument before building a subprocess call. The fix is registering
+    the new result in the side table."""
     a = make_flagged("hello")
     result = str(a)
     assert type(result) is str

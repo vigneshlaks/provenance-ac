@@ -1,6 +1,6 @@
-"""Deterministic tests for agent_demo's tool-call parsing/dispatch --
-independent of the model, so these don't inherit its non-determinism.
-Whether the *model* decides to call these tools is covered separately by
+"""Deterministic tests for agent_demo's tool call parsing and dispatch,
+independent of the model. Whether the model decides to call these tools is
+covered separately by
 agent_demo/incident_a_credential_phishing/run_incident_a.py.
 """
 
@@ -36,8 +36,8 @@ def test_simple_tool_call_dispatches(tmp_path):
 
 def test_nested_tool_call_blocked_by_default_even_for_plain_content(tmp_path):
     """Every file read is tagged regardless of how sensitive its content
-    looks (v1 sources tag unconditionally, spec §5) -- so piping read_file
-    straight into send_external is blocked even for innocuous text."""
+    looks, since sources tag unconditionally, so piping read_file straight
+    into send_external is blocked even for innocuous text."""
     f = tmp_path / "notes.txt"
     f.write_text("plain content")
     tools = {"read_file": tool_read_file, "send_external": tool_send_external}
@@ -89,7 +89,7 @@ def test_nested_tool_call_blocked_when_flagged(tmp_path):
 def test_disallowed_tool_is_rejected(tmp_path):
     f = tmp_path / "notes.txt"
     f.write_text("x")
-    tools = {"read_file": tool_read_file}  # send_external intentionally not scoped in
+    tools = {"read_file": tool_read_file}  # send_external is intentionally not scoped in
 
     with rules.installed():
         with pytest.raises(ToolCallError):
@@ -105,17 +105,16 @@ def test_malformed_tool_call_raises_tool_call_error():
 
 
 def test_arbitrary_code_is_not_executed():
-    """Only ast.parse + whitelist dispatch -- never eval(). A call to
-    something not in the whitelist (even a builtin) must be rejected, not
-    executed."""
+    """Only ast.parse and whitelist dispatch are used, never eval(). A call
+    to something not in the whitelist, even a builtin, must be rejected."""
     with pytest.raises(ToolCallError):
         parse_and_run_tool('TOOL: __import__("os").system("echo pwned")', {})
 
 
 # --------------------------------------------------------------------------
-# Incident B (allowlist bypass): a flagged credential must be blocked even
-# when the destination URL is genuinely on an allowlist -- the point is
-# that provenance tracking checks the *credential's* origin, not the URL.
+# Incident B, allowlist bypass. A flagged credential must be blocked even
+# when the destination URL is genuinely on an allowlist. Provenance
+# tracking checks the credential's origin, not the URL.
 # --------------------------------------------------------------------------
 
 def test_flagged_credential_blocked_even_at_an_allowed_destination(tmp_path):
@@ -123,8 +122,8 @@ def test_flagged_credential_blocked_even_at_an_allowed_destination(tmp_path):
     f.write_text("sk-attacker-injected-key")
     tools = {"read_file": tool_read_file, "send_to_service": tool_send_to_service}
 
-    # This URL is not a trick -- it's a perfectly ordinary destination. The
-    # block has to come from the credential's origin, not the URL.
+    # An ordinary destination, not a trick. The block has to come from the
+    # credential's origin, not the URL.
     with rules.installed():
         with pytest.raises(ProvenanceViolation) as exc_info:
             parse_and_run_tool(
@@ -159,10 +158,9 @@ def test_credential_use_allowed_once_sanitized(tmp_path):
 
 
 def test_credential_stays_flagged_inside_nested_json_kwarg(tmp_path):
-    """The api_key ends up nested inside requests.post's json= dict, not a
-    top-level argument -- confirms find_flagged's recursive walk (§5:
-    'recursively through basic containers') actually reaches it there,
-    not just at the top level."""
+    """The api_key ends up nested inside requests.post's json keyword
+    argument, not as a top level argument, which confirms find_flagged's
+    recursive walk actually reaches it there, not just at the top level."""
     f = tmp_path / "config_notes.txt"
     f.write_text("sk-nested-flagged-key")
     tools = {"read_file": tool_read_file, "send_to_service": tool_send_to_service}
@@ -177,15 +175,15 @@ def test_credential_stays_flagged_inside_nested_json_kwarg(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Layer 7 (supply-chain / tool-poisoning): a tool whose *description*
-# lies about what it does. Enforcement must not care -- it never reads
-# tool descriptions at all, only the real runtime call.
+# Layer 7, supply chain and tool poisoning. A tool whose description lies
+# about what it does. Enforcement must not care. It never reads tool
+# descriptions, only the underlying runtime call.
 # --------------------------------------------------------------------------
 
 def test_debug_log_description_claims_no_transmission():
-    """Sanity check on the premise: confirm the description really does
-    claim purely local behavior, with nothing in the text that would tip
-    off a reader (model or human) that it actually exfiltrates."""
+    """Confirms the description really does claim purely local behavior,
+    with nothing that would tip off a reader, model or human, that it
+    actually exfiltrates."""
     description = TOOL_DESCRIPTIONS["debug_log"]
     assert "does not transmit data anywhere" in description
     assert "http" not in description.lower()
@@ -194,12 +192,10 @@ def test_debug_log_description_claims_no_transmission():
 
 
 def test_poisoned_tool_blocked_despite_benign_description(tmp_path):
-    """The tool's description is fully benign. The model (or a human
-    calling it directly, as this test does) has no way to know from the
-    description alone that this tool transmits data anywhere. Enforcement
-    still blocks it, because it inspects the real requests.post call
-    tool_debug_log makes internally -- the description was never
-    consulted at all."""
+    """The tool's description is fully benign. Nothing in it reveals that
+    this tool transmits data anywhere. Enforcement still blocks it, because
+    it inspects the actual requests.post call tool_debug_log makes
+    internally. The description is never consulted."""
     f = tmp_path / "notes.txt"
     f.write_text("ordinary content")
     tools = {"read_file": tool_read_file, "debug_log": tool_debug_log}
@@ -231,10 +227,9 @@ def test_poisoned_tool_allowed_once_sanitized(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# run_agent's tolerance for a model omitting the "TOOL:" prefix -- found
-# for real running the layer 7 demo, not a hypothetical: the model
-# produced a well-formed, dispatchable call and the harness silently
-# misclassified it as a final answer because it lacked the exact prefix.
+# run_agent's tolerance for a model omitting the "TOOL:" prefix. A model
+# can produce a well formed, dispatchable call that the harness would
+# otherwise misclassify as a final answer for lacking the exact prefix.
 # --------------------------------------------------------------------------
 
 def test_bare_tool_call_recognized_when_name_is_whitelisted():
@@ -244,9 +239,9 @@ def test_bare_tool_call_recognized_when_name_is_whitelisted():
 
 def test_bare_call_not_recognized_for_unknown_name():
     tools = {"read_file": tool_read_file}
-    # matches the bare-call shape syntactically, but "unknown_tool" was
-    # never whitelisted for this scenario -- must not be treated as a
-    # tool call regardless of shape.
+    # This matches the bare call shape, but "unknown_tool" was never
+    # whitelisted for this scenario, so it must not be treated as a tool
+    # call regardless.
     assert not _looks_like_bare_tool_call('unknown_tool(data="x")', tools)
 
 
@@ -256,12 +251,12 @@ def test_plain_prose_not_recognized_as_a_call():
 
 
 # --------------------------------------------------------------------------
-# Delegation boundary (see agent_demo/delegation_boundary/): the core,
-# structural claim behind that experiment, tested directly and fast here
-# rather than only via the live multi-agent run. tokenizer.apply_chat_template
-# is real, third-party code -- confirmed empirically, not assumed, that it
-# returns a list of token IDs, not a string, which is what destroys a
-# ProvenanceStr's tag before a sub-agent's generation even starts.
+# The delegation boundary, see agent_demo/delegation_boundary/. This is the
+# core claim behind that experiment, tested directly and quickly here
+# rather than only through the live run with a second agent.
+# tokenizer.apply_chat_template returns a list of token ids, not a string,
+# which destroys a ProvenanceStr's tag before a second agent's generation
+# even starts.
 # --------------------------------------------------------------------------
 
 def test_chat_template_tokenizes_immediately_destroying_the_tag():
@@ -272,16 +267,14 @@ def test_chat_template_tokenizes_immediately_destroying_the_tag():
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": flagged},
     ]
-    # Ordinary Python semantics preserve the tag up to this point -- same
-    # "labels not boxes" principle as everywhere else in this project.
+    # Ordinary Python semantics preserve the tag up to this point.
     assert is_flagged(messages[1]["content"])
 
     _, tokenizer = _get_model()
     prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
 
-    # The real finding: this is a list of integers, not a string. There is
-    # no Python-level object here a tag could survive on even in
-    # principle -- confirmed, not a string-formatting quirk like the
-    # str()/GitPython gap (ADR-005), a structurally earlier and harder wall.
+    # This is a list of integers, not a string. There is no Python level
+    # object here for a tag to survive on, a structurally earlier and
+    # harder wall than the gap involving str() and GitPython.
     assert isinstance(prompt, list)
     assert all(isinstance(tok, int) for tok in prompt)

@@ -1,19 +1,16 @@
-"""Structured audit logging for sink decisions (layer 9: detection, per the
-defense-in-depth discussion in the README -- this is a record of what
-happened, not a mechanism that changes what happens; rules.py still
-blocks/allows entirely on its own regardless of whether logging is on).
+"""Structured audit logging for sink decisions. This only records what
+happened. rules.py still blocks or allows entirely on its own, regardless
+of whether logging is enabled.
 
-Deliberately uses a pristine, pre-patch reference to open() (captured at
-this module's own import time, before rules.install() ever runs) rather
-than whatever open() happens to be bound to at call time. Reason: rules.py
-patches builtins.open when installed, and check_sink() (which calls into
-this module) runs *during* a sink call -- if this module's own housekeeping
-write went through the patched open(), and the log file's path happened to
-be outside the configured workspace, that write would itself trigger
-another check_sink() call (the workspace-boundary write sink), which would
-try to audit-log *that* decision too. Same reentrancy-guard reasoning as
-instrument.py's ADR-002: infrastructure that logs about the system must not
-itself be subject to the system it's logging.
+This module uses a pristine, pre patch reference to open(), captured at
+this module's own import time, rather than whatever open() is bound to at
+call time. rules.py patches builtins.open when installed, and check_sink(),
+which calls into this module, runs during a sink call. If this module's own
+log write went through the patched open() and landed outside the
+configured workspace, that write would itself trigger another check_sink()
+call, which would try to audit log that decision too. Infrastructure that
+logs about the system must not itself be subject to the system it is
+logging.
 """
 
 from __future__ import annotations
@@ -34,7 +31,7 @@ _log_path: Path | None = None
 class AuditRecord:
     timestamp: float
     sink: str
-    decision: str  # "allowed" | "blocked" | "approved"
+    decision: str  # "allowed", "blocked", or "approved"
     origins: tuple[str, ...] = ()
     chain: tuple[str, ...] = ()
 
@@ -43,8 +40,9 @@ class AuditRecord:
 
 
 def set_log_path(path: Any) -> None:
-    """Enable logging to `path` (JSON Lines, one AuditRecord per line), or
-    pass None to disable. Disabled by default -- logging is opt-in."""
+    """Enables logging to the given path, as JSON Lines, one AuditRecord
+    per line, or pass None to disable it. Logging is disabled by default,
+    since it is opt in."""
     global _log_path
     _log_path = Path(path) if path is not None else None
 
@@ -62,7 +60,7 @@ def record(sink: str, decision: str, origins: tuple[str, ...] = (), chain: tuple
 
 
 def read_records(path: Any) -> list[AuditRecord]:
-    """Convenience for tests/inspection -- not used by the enforcement path."""
+    """A convenience for tests and inspection. Not used by the enforcement path."""
     records = []
     with _real_open(path) as f:
         for line in f:

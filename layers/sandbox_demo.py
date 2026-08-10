@@ -1,32 +1,28 @@
-"""Layer 4 (OS-level sandboxing) demo -- a complement to, not a
-replacement for, application-level provenance tracking (provenance/rules.py).
+"""Layer 4, an OS level sandboxing demo. This is a complement to
+application level provenance tracking in provenance/rules.py, not a
+replacement for it.
 
-Verified empirically before building this (ADR-004, see README):
-- sandbox-exec is deprecated by Apple (confirmed via its own man page) but
-  still functional on this system (macOS 26.5).
-- Per-destination network filtering (`(remote ip "host:port")`) is NOT
-  available on this macOS version -- sandbox-exec only accepts "*" or
-  "localhost" as a host, so this tool can only do blanket allow/deny of
-  all network egress, not "allow this destination, block that one." Our
-  own app-layer sinks CAN do that (checking which destination, based on
-  data provenance) -- genuine destination-selective network filtering
-  would need a real firewall (pfctl) or a filtering proxy, neither built
-  here.
-- Filesystem path scoping DOES work with real granularity (confirmed with
-  a subpath deny rule) -- macOS resolves /tmp to /private/tmp (and
-  tempfile's default dir similarly), so profile paths must use the
-  resolved path or the rule silently no-ops. Confirmed this the hard way:
-  a first attempt using an unresolved path did not block the write it was
-  supposed to.
+Some notes on sandbox-exec, which this demo depends on. It is deprecated
+by Apple but still functional on this system, macOS 26.5. Filtering
+network access by destination, using a rule like (remote ip "host:port"),
+isn't available on this macOS version. sandbox-exec only accepts "*" or
+"localhost" as a host, so it can only do a blanket allow or deny of all
+network egress, not "allow this destination, block that one." Our own
+application layer sinks can do that, since they check the destination
+based on data provenance. Genuine filtering by destination at the OS level
+would need an actual firewall, such as pfctl, or a filtering proxy, and
+neither is built here. Filesystem path scoping does work with genuine
+granularity, but macOS resolves /tmp to /private/tmp, and tempfile's
+default directory resolves similarly, so profile paths must use the
+resolved path or the rule silently does nothing.
 
-Scenario: simulate application-level provenance enforcement being bypassed
-or having a gap entirely (exactly the kind of gap already documented in
-rules.py/README -- e.g. a value laundered through .upper() before
-reaching a sink) -- read a credentials file and write its content outside
-the declared workspace, with NO provenance system involved at all. Run
-twice: unsandboxed (the write succeeds -- nothing stops it) and sandboxed
-(the OS blocks it independently, with zero concept of "provenance" --
-it's only enforcing a path boundary).
+The scenario simulates application level provenance enforcement having a
+gap, for example a value laundered through .upper() before reaching a
+sink. It reads a credentials file and writes its content outside the
+declared workspace, with no provenance system involved at all. It runs
+twice, once unsandboxed, where the write succeeds, and once sandboxed,
+where the OS blocks it independently, with zero concept of provenance. It
+only enforces a path boundary.
 """
 
 from __future__ import annotations
@@ -87,8 +83,8 @@ def run_once(sandboxed: bool) -> dict:
 
 
 def main() -> None:
-    print("Layer 4 demo: OS-level sandbox as an independent backstop when")
-    print("application-level provenance enforcement is bypassed entirely.\n")
+    print("Layer 4 demo: an OS level sandbox as an independent backstop when")
+    print("application level provenance enforcement is bypassed entirely.\n")
 
     unsandboxed = run_once(sandboxed=False)
     print(f"Without sandbox: exfiltration_succeeded={unsandboxed['exfiltration_succeeded']}")
@@ -102,13 +98,13 @@ def main() -> None:
     print()
     if unsandboxed["exfiltration_succeeded"] and not sandboxed["exfiltration_succeeded"]:
         print(
-            "Confirmed: the OS-level sandbox independently stopped the exfiltration "
-            "attempt with zero knowledge of 'provenance' as a concept -- it only "
+            "Confirmed: the OS level sandbox independently stopped the exfiltration "
+            "attempt with zero knowledge of provenance as a concept. It only "
             "enforces a filesystem path boundary, regardless of why a value ended up "
             "outside it."
         )
     else:
-        print("WARNING: unexpected result -- see raw output above.")
+        print("WARNING: unexpected result, see the raw output above.")
 
 
 if __name__ == "__main__":

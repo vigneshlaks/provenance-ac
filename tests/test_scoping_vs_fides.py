@@ -1,32 +1,20 @@
-"""Novelty-mining Stage 1/2 result (see README/conversation record): FIDES
-("Securing AI Agents with Information-Flow Control," Costa & Köpf,
-Microsoft) names, in their own words, a "fundamental limitation" of their
-design that they only "partially address":
+"""FIDES, "Securing AI Agents with Information-Flow Control," by Costa and
+Köpf at Microsoft, names its own fundamental limitation: tainting happens
+per session, so once any untrusted data enters, the entire downstream
+conversation becomes over restricted, even for tool calls that never touch
+that data.
 
     "when a tool returns untrusted or confidential data, this data
     immediately taints the conversation history, restricting the tools
     that can be called later without violating security policies"
 
-i.e. FIDES's tainting is coarse-grained -- once ANY untrusted data enters,
-the entire downstream conversation/session becomes over-restricted, even
-for tool calls that never touch that data at all. This costs real utility
-(their own reported numbers show a utility gap they attribute partly to
-this).
-
-Our design tracks provenance per OBJECT (ProvenanceStr / the id-keyed
-side-table), not per conversation or session. check_sink()/find_flagged()
-only ever inspects the actual arguments passed to the specific call being
-made -- there is no session-wide or conversation-wide taint state
-anywhere in rules.py or storage.py. The hypothesis, tested directly here
-rather than assumed: an unrelated sink call using only clean data, made
-in the same `rules.installed()` session as an earlier flagged read,
-should NOT be restricted by that earlier read at all.
-
-This is real, checkable content: it's a genuine architectural comparison
-against a specific, cited, named limitation in closely related published
-work, not a reimplementation of anything and not a guessed research
-candidate -- FIDES stated the gap in their own paper; this test confirms
-whether (and precisely why) our design doesn't share it.
+Our design tracks provenance per object, through ProvenanceStr and the
+side table keyed by id, not per conversation or session. check_sink() and
+find_flagged() only ever inspect the actual arguments passed to the
+specific call being made. This tests that directly: an unrelated sink call
+using only clean data, made in the same rules.installed() session as an
+earlier flagged read, should not be restricted by that earlier read at
+all.
 """
 
 import responses
@@ -40,17 +28,15 @@ def test_unrelated_clean_call_not_restricted_by_earlier_flagged_read(tmp_path):
     secret_file.write_text("sk-secret-value")
 
     with rules.installed():
-        # Step 1: read flagged data. In FIDES's design, this is exactly the
-        # moment their "conversation history" gets tainted.
+        # Reading flagged data. In FIDES's design, this is where their
+        # conversation history would get tainted.
         with open(secret_file) as f:
             secret = f.read()
         assert is_flagged(secret), "sanity check: the read really was tagged"
 
-        # Step 2: a completely unrelated sink call, later in the same
-        # session, using data that was never derived from `secret` in any
-        # way. If our design had FIDES's named limitation, this would be
-        # blocked purely because *some* flagged data exists somewhere in
-        # this session -- it must not be.
+        # An unrelated sink call, later in the same session, using data
+        # never derived from secret. This must not be blocked just because
+        # some flagged data exists elsewhere in this session.
         with responses.RequestsMock() as rsps:
             rsps.add(responses.POST, "https://safe.example/status", status=200)
             import requests
@@ -60,9 +46,9 @@ def test_unrelated_clean_call_not_restricted_by_earlier_flagged_read(tmp_path):
 
 
 def test_multiple_earlier_flagged_reads_still_dont_restrict_unrelated_call(tmp_path):
-    """Same property, stress-tested with more accumulated flagged state --
-    several flagged reads, not just one, to make sure the result isn't an
-    artifact of only testing the single-taint case."""
+    """The same property, with several accumulated flagged reads instead
+    of just one, to rule out this being an artifact of the single taint
+    case."""
     files = [tmp_path / f"secret{i}.txt" for i in range(5)]
     for f in files:
         f.write_text("sk-another-secret")
@@ -82,11 +68,10 @@ def test_multiple_earlier_flagged_reads_still_dont_restrict_unrelated_call(tmp_p
 
 
 def test_the_actual_flagged_value_is_still_correctly_blocked_in_the_same_session(tmp_path):
-    """Sanity check that the above isn't secretly "enforcement is broken" --
-    within the exact same session, a call that DOES use the flagged value
-    must still be blocked. Confirms the earlier tests pass because
-    per-object tracking works correctly, not because enforcement is
-    accidentally disabled."""
+    """Confirms the tests above pass because per-object tracking works,
+    not because enforcement is accidentally disabled. Within the same
+    session, a call that does use the flagged value must still be
+    blocked."""
     from provenance.exceptions import ProvenanceViolation
     import pytest
 
@@ -97,12 +82,13 @@ def test_the_actual_flagged_value_is_still_correctly_blocked_in_the_same_session
         with open(secret_file) as f:
             secret = f.read()
 
-        # unrelated clean call first -- proves scoping
+        # An unrelated clean call first, to prove scoping.
         with responses.RequestsMock() as rsps:
             rsps.add(responses.POST, "https://safe.example/status", status=200)
             import requests
             requests.post("https://safe.example/status", data="clean")
 
-        # now actually use the flagged value -- must still be blocked
+        # Now actually using the flagged value. This must still be
+        # blocked.
         with pytest.raises(ProvenanceViolation):
             requests.post("https://safe.example/status", data=secret)

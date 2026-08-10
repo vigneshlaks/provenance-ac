@@ -1,7 +1,7 @@
-"""Tests for layers 8 (human oversight) and 9 (audit logging) -- see
-README ADR-004. Layer 4 (sandboxing) is a subprocess-level OS demo, not
-something to unit test the same way; see layers/sandbox_demo.py, which
-verifies itself by asserting on its own before/after behavior.
+"""Tests for layer 8, human oversight, and layer 9, audit logging. Layer 4,
+sandboxing, is a subprocess level OS demo, not something to unit test the
+same way. See layers/sandbox_demo.py, which verifies itself by asserting
+on its own before and after behavior.
 """
 
 import pytest
@@ -61,9 +61,8 @@ def test_approval_hook_receives_sink_name_and_record():
 
 
 def test_no_hook_registered_is_the_default():
-    # Sanity check on the "opt-in, off by default" claim in set_approval_hook's
-    # docstring -- after any test above unregisters its hook, behavior must
-    # be back to a flat block.
+    # After any test above unregisters its hook, behavior must be back to a
+    # flat block, confirming the hook is opt in, not sticky.
     with pytest.raises(ProvenanceViolation):
         check_sink("test.sink", make_flagged("secret"))
 

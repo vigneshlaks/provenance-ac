@@ -1,18 +1,20 @@
-"""Compatibility patch for agentdojo's LocalLLM output parser, not a
-provenance-logic change -- applied identically regardless of which
-pipeline (undefended or provenance-gated) is running, so it doesn't bias
-the comparison.
+"""A compatibility patch for agentdojo's LocalLLM output parser. This is
+not a change to any provenance logic, and it's applied identically to both
+pipelines, undefended and provenance gated, so it doesn't bias the
+comparison.
 
-AgentDojo's default parser (_parse_model_output) takes everything between
-`<function=name>` and the next `</function>` (or end of string if that
-tag never appears) and json.loads()s it verbatim. Our small local model
-reliably produces valid JSON but then trails off into prose afterward
-without closing the tag cleanly (observed directly: a real completion
-was `{"file_path": "bill-december-2023.txt"}>\n\`\`\`\n\nPlease note
-that I'm assuming...`) -- valid JSON followed by junk, which the
-tag-boundary search captures as one blob and fails to parse. This patch
-finds the first balanced {...} object after the opening tag instead of
-relying on the closing tag being present, and ignores anything after it.
+AgentDojo's default parser, _parse_model_output, takes everything between
+an opening function tag and the next closing tag, or the end of the string
+if that tag never appears, and passes it straight to json.loads(). Our
+small local model reliably produces valid JSON but then trails off into
+prose afterward without closing the tag cleanly. An actual completion
+looked like this: {"file_path": "bill-december-2023.txt"} followed by a closing
+angle bracket, a code fence, and then "Please note that I'm assuming...".
+That's valid JSON followed by junk, and the search for the tag boundary
+captures the whole thing as one blob and fails to parse it. This patch
+finds the first balanced object in curly braces after the opening tag
+instead of relying on the closing tag being present, and ignores anything
+after it.
 """
 
 from __future__ import annotations

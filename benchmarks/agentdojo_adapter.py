@@ -1,37 +1,32 @@
-"""Adapter wiring our provenance approach into AgentDojo, an external,
-third-party benchmark (used to evaluate CaMeL, FIDES, and others) for
-prompt-injection attacks/defenses on tool-using LLM agents.
+"""An adapter wiring our provenance approach into AgentDojo, an external,
+third party benchmark used to evaluate CaMeL, FIDES, and others, for prompt
+injection attacks and defenses on tool using language model agents.
 
-ADR-003 (see README): two things ruled out reusing rules.py directly.
+This doesn't reuse rules.py directly, for two reasons.
 
-1. AgentDojo's tools are simulated, in-memory Python functions operating
-   on Pydantic model state (BankAccount, Filesystem, ...), not real
-   stdlib/requests/subprocess calls. rules.py's monkey-patches of
-   open/requests.post/subprocess.run have nothing to intercept here.
+First, AgentDojo's tools are simulated, in memory Python functions
+operating on Pydantic model state, such as BankAccount and Filesystem, not
+actual stdlib, requests, or subprocess calls, so rules.py's monkey patches
+have nothing to intercept.
 
-2. More fundamentally: object-identity provenance (storage.py's entire
-   design, and the thing that made Phase 1's milestone trivial -- "b = a"
-   needs no propagation code because it's the same object) does not
-   survive AgentDojo's harness. Traced through ToolsExecutor and
-   LocalLLM._parse_model_output: every tool result gets formatted to a
-   string and appended to the message history; the LLM reads that string
-   and *generates fresh JSON text* for its next tool call's arguments,
-   which gets json.loads()'d into a brand-new object. The string that
-   reaches a sink argument is never the same object a source tagged --
-   there is no nested-call evaluation here the way agent_demo/agent_loop.py
-   has, where an inner tool call is actually executed and its real return
-   object flows into the outer call. id()-based matching would just never
-   fire.
+Second, and more fundamentally, the object identity approach to
+provenance, which is storage.py's whole design, doesn't survive AgentDojo's
+harness. Every tool result gets formatted to a string and appended to the
+message history. The model reads that string and generates fresh JSON text
+for its next tool call's arguments, which gets parsed by json.loads() into
+a brand new object. The string reaching a sink argument is never the same
+object a source tagged. Unlike agent_demo/agent_loop.py, there is no nested
+call evaluation here where an inner tool call's own return object flows
+into the outer call, so matching based on id() would never fire.
 
-So this adapter uses content-based matching instead: source-tool outputs
-are logged as (content, origin) pairs; a sink call is blocked if any of
-its argument values contains, or is contained in, a sufficiently long
-piece of previously-logged content. This is strictly weaker than
-object-identity tracking -- it can miss a value the model paraphrased
-rather than copied, and can in principle false-positive on a coincidental
-substring match -- and that tradeoff is deliberate and documented, not
-hidden. MIN_MATCH_LENGTH exists specifically to suppress trivial
-short-string false positives (a bare "a" or "the" matching everything).
+So this adapter matches based on content instead. Source tool outputs are
+logged as pairs of content and origin, and a sink call is blocked if any
+argument contains, or is contained in, a sufficiently long piece of
+previously logged content. This is strictly weaker than tracking based on
+object identity. It can miss a value the model paraphrased rather than
+copied, and it can produce a false positive on a coincidental substring
+match. MIN_MATCH_LENGTH suppresses trivial false positives from short
+strings, such as a bare "a" or "the" matching everything.
 """
 
 from __future__ import annotations
@@ -52,9 +47,9 @@ MIN_MATCH_LENGTH = 6
 
 @dataclasses.dataclass
 class ContentProvenanceLog:
-    """Per-run registry of (content, origin-tool-name) pairs tagged from
-    source tool outputs. Deliberately a fresh instance per task run --
-    unlike storage.side_table, this is not global state, so independent
+    """A per run registry of content and origin pairs, where origin is the
+    name of the source tool that produced the content. This is a fresh
+    instance for each task run, unlike storage.side_table, so independent
     benchmark tasks can't leak flagged content into each other."""
 
     entries: list[tuple[str, str]] = dataclasses.field(default_factory=list)
@@ -84,10 +79,10 @@ class BlockedCall:
 
 
 class ProvenanceGatedToolsExecutor(BasePipelineElement):
-    """Drop-in replacement for agentdojo.agent_pipeline.ToolsExecutor.
-    Structurally mirrors it (same message-handling logic), adding one
+    """A direct replacement for agentdojo.agent_pipeline.ToolsExecutor. It
+    mirrors the same message handling logic structurally, and adds one
     thing: sink tool calls get their arguments checked against a
-    ContentProvenanceLog before execution; source tool calls have their
+    ContentProvenanceLog before execution, and source tool calls have their
     formatted output logged after execution.
     """
 

@@ -1,21 +1,17 @@
-"""Phase 4 (spec §8): real, measured runtime overhead of instrumentation --
-not an estimate. Runs a representative workload against the real,
-unmodified target/mcp-server-git code, with and without
-provenance.rules.installed(), and reports the actual multiplier.
+"""Measured runtime overhead of instrumentation. This runs a representative
+workload against the unmodified target/mcp-server-git code, with and
+without provenance.rules.installed(), and reports the actual multiplier.
 
-Methodology, matching the standard practice for this kind of measurement
-(the sys.settrace/sys.monitoring benchmarking literature reviewed earlier
-in this project uses repeated runs, not a single sample, to average out
-OS-level scheduling noise): run the same fixed workload cycle N times per
-condition, take the median across repetitions (robust to occasional
-outliers a mean isn't), report median-with-instrumentation /
-median-without as the real multiplier.
+It runs the same fixed workload cycle N times per condition and takes the
+median across repetitions, which is robust to occasional outliers in a way
+a mean isn't, and reports the median with instrumentation divided by the
+median without as the multiplier.
 
-Each repetition uses a *fresh* temp repo, and does the same fixed number
-of operations within it -- so repo growth (more commits => slower log/
-status) affects both conditions identically, and the comparison isolates
-instrumentation overhead specifically rather than being confounded by
-repo size drifting differently between conditions.
+Each repetition uses a fresh temp repo and does the same fixed number of
+operations within it, so repo growth, meaning more commits leading to a
+slower log or status, affects both conditions identically. This isolates
+the instrumentation overhead rather than confounding it with repo size
+drifting differently between conditions.
 """
 
 from __future__ import annotations
@@ -36,7 +32,7 @@ from provenance import rules
 from provenance.storage import side_table
 
 CYCLES_PER_RUN = 20
-REPETITIONS = 11  # odd number -> clean median
+REPETITIONS = 11  # An odd number gives a clean median.
 
 
 def workload_cycle(repo: "gitmodule.Repo", i: int) -> None:
@@ -58,17 +54,17 @@ def run_once(instrumented: bool) -> float:
         repo = gitmodule.Repo.init(pathlib.Path(tmp) / "repo")
 
         if instrumented:
-            # ADR-006: the side-table is process-global and never cleared
-            # by uninstall() -- reset it between independent repetitions so
-            # a stale id()-keyed entry from an earlier, already-deleted
-            # temp repo can't collide with a new object in this one (this
-            # is exactly what happened the first time this benchmark ran).
+            # The side table is global to the process and never cleared by
+            # uninstall(), so it's reset between repetitions here. Without
+            # that, a stale id() keyed entry from an earlier, already
+            # deleted temp repo could collide with a new object in this
+            # one.
             side_table.clear_all()
-            # Workspace defaults to CWD, not this run's temp repo -- set it
-            # explicitly so git's own internal bookkeeping writes
-            # (.git/COMMIT_EDITMSG, etc.) are correctly treated as inside
-            # the intended operating area, not flagged as "outside
-            # workspace" writes.
+            # The workspace defaults to the current working directory, not
+            # this run's temp repo, so it's set explicitly here. That way
+            # git's own bookkeeping writes, such as .git/COMMIT_EDITMSG,
+            # are treated as inside the operating area rather than flagged
+            # as writes outside the workspace.
             rules.set_workspace(repo.working_dir)
             rules.install()
         try:
@@ -83,8 +79,8 @@ def run_once(instrumented: bool) -> float:
 
 
 def main() -> None:
-    print(f"Overhead measurement: {REPETITIONS} repetitions x {CYCLES_PER_RUN} cycles/run")
-    print(f"Workload/cycle: write file, add, commit, diff, add, commit, status, log\n")
+    print(f"Overhead measurement: {REPETITIONS} repetitions of {CYCLES_PER_RUN} cycles each")
+    print("Workload per cycle: write file, add, commit, diff, add, commit, status, log\n")
 
     baseline_times = [run_once(instrumented=False) for _ in range(REPETITIONS)]
     instrumented_times = [run_once(instrumented=True) for _ in range(REPETITIONS)]
@@ -93,19 +89,19 @@ def main() -> None:
     instrumented_median = statistics.median(instrumented_times)
     multiplier = instrumented_median / baseline_median
 
-    print(f"Baseline (no instrumentation):     median={baseline_median:.4f}s  "
+    print(f"Baseline, no instrumentation:     median={baseline_median:.4f}s  "
           f"min={min(baseline_times):.4f}s  max={max(baseline_times):.4f}s")
-    print(f"Instrumented (rules.installed()):  median={instrumented_median:.4f}s  "
+    print(f"Instrumented, rules.installed():  median={instrumented_median:.4f}s  "
           f"min={min(instrumented_times):.4f}s  max={max(instrumented_times):.4f}s")
     print()
-    print(f"Real measured overhead multiplier: {multiplier:.3f}x  ({(multiplier - 1) * 100:+.1f}%)")
+    print(f"Measured overhead multiplier: {multiplier:.3f}x  ({(multiplier - 1) * 100:+.1f}%)")
     print(
-        "\nCaveat: this workload is subprocess-dominated (6 real git command "
-        "spawns per cycle) -- the git binary's own execution cost swamps our "
-        "per-call Python-level check. A workload with many pure-Python "
-        "operations and few real subprocess/network calls would have less "
-        "real work to amortize the check against, and could show higher "
-        "relative overhead than this number suggests."
+        "\nCaveat: this workload is dominated by subprocess calls, with six "
+        "actual git command spawns per cycle, so the git binary's own execution "
+        "cost swamps our per-call Python level check. A workload with many pure "
+        "Python operations and few subprocess or network calls actually made "
+        "would have less work to amortize the check against, and could show "
+        "higher relative overhead than this number suggests."
     )
 
 

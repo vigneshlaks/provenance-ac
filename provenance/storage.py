@@ -1,27 +1,21 @@
-"""Provenance storage: side-table for immutable primitives, plus wrapper
-types (ProvenanceStr, ProvenanceDict) for values that can hold real
-attributes.
+"""Provenance storage. There is a side table for immutable primitives, and
+there are wrapper types, ProvenanceStr and ProvenanceDict, for values that
+can hold attributes of their own.
 
-Architecture note (ADR-001, see README):
+Where the type is under our control, ProvenanceStr and ProvenanceDict hold
+their ProvenanceRecord as an actual attribute, so provenance travels with
+the object itself. Plain primitives such as bytes, int, and float can't carry an
+attribute and don't support weak references, so those fall back to the side
+table below, which is a plain dict keyed by id(value). That means there is
+no garbage collection notification when an untracked primitive is
+collected, so a stale id() can in principle be reused by an unrelated
+object and produce a false provenance flag. See the limitations section of
+the README.
 
-CPython's built-in str methods do not preserve subclasses -- verified
-empirically: `S("x").upper()`, `.split()`, slicing, and `str(x)` all return
-plain `str`, not `S`, even when `S` subclasses `str`. Plain str/int/float/
-bytes instances also do not support weak references. So the "side-table"
-below is a plain dict keyed by id(value), not a true WeakValueDictionary:
-there is no way to be notified when an untracked plain primitive is garbage
-collected, so a stale id() can in principle be reused by an unrelated new
-object, producing a false provenance flag. This is a real, documented
-correctness risk (see README limitations) that we do not fully eliminate.
-
-Where the type is under our control, we sidestep the side-table's id-reuse
-risk entirely by using a wrapper (ProvenanceStr, ProvenanceDict) that holds
-its ProvenanceRecord as a real attribute on the object itself. The side-table
-remains as the fallback for the cases wrapping can't reach: values crossing
-an opaque boundary (an unwrapped result from a C extension or a builtin
-method we have not explicitly overridden -- e.g. `.upper()` on a
-ProvenanceStr silently returns a plain, unflagged `str` unless the caller
-re-wraps it; that gap is tracked in propagation.py, Phase 2).
+The side table is also the fallback for values crossing an opaque boundary
+that wrapping can't reach. For example, calling .upper() on a ProvenanceStr
+returns a plain, unflagged str unless the caller re-wraps it, since
+CPython's str methods don't preserve subclasses.
 """
 
 from __future__ import annotations
@@ -45,7 +39,7 @@ class ProvenanceRecord:
         return dataclasses.replace(self, chain=self.chain + (step,))
 
     def merge(self, other: "ProvenanceRecord | None", step: str) -> "ProvenanceRecord":
-        """Combine this record with another value's record (e.g. for a+b),
+        """Combines this record with another value's record, as for a + b,
         recording the operation in the chain. `other` may be None if the
         other operand carries no provenance at all."""
         if other is None:
@@ -62,22 +56,18 @@ class ProvenanceRecord:
 
 
 class _IdSideTable:
-    """id()-keyed provenance table for plain immutable primitives that were
-    not created through a wrapper type. See ADR-001 above for why this is a
-    plain dict rather than a real WeakValueDictionary, and the id-reuse risk
-    that follows from that.
+    """A provenance table, keyed by id(), for plain immutable primitives
+    that were not created through a wrapper type. It is a plain dict rather
+    than a WeakValueDictionary, so it carries the id reuse risk described
+    above.
 
-    Confirmed for real, not just theoretically, via ADR-006 (README):
-    `rules.uninstall()` does NOT clear this table -- it only restores the
-    patched functions. So the table accumulates for the entire process
-    lifetime by default, across every `installed()`/`uninstall()` cycle,
-    not just within one. Running many short-lived operations in a tight
-    loop (exactly what benchmarks/overhead_measurement.py does) is exactly
-    the condition that makes a later object's id() likely to collide with
-    an earlier, already-deleted one -- and it did, causing a real false
-    positive during that benchmark. `clear_all()` exists for exactly this:
-    resetting between independent runs/benchmark repetitions so stale
-    entries from a finished, unrelated run can't leak into the next one.
+    Calling rules.uninstall() does not clear this table, it only restores
+    the patched functions, so entries accumulate for the process lifetime
+    across installed() and uninstall() cycles. In a tight loop of short
+    lived operations, a later object's id() can collide with an earlier,
+    already deleted one and produce a false positive. This happened in
+    practice in benchmarks/overhead_measurement.py. clear_all() resets the
+    table between independent runs to avoid that.
     """
 
     def __init__(self) -> None:
@@ -103,8 +93,8 @@ side_table = _IdSideTable()
 
 
 def get_provenance(value: Any) -> "ProvenanceRecord | None":
-    """Look up provenance for any value, whether it's a wrapper type or a
-    plain primitive registered in the side-table."""
+    """Looks up provenance for any value, whether it is a wrapper type or a
+    plain primitive registered in the side table."""
     if isinstance(value, (ProvenanceStr, ProvenanceDict)):
         return value._provenance
     return side_table.get(value)
@@ -116,13 +106,12 @@ def is_flagged(value: Any) -> bool:
 
 
 class ProvenanceStr(str):
-    """A str subclass carrying a real ProvenanceRecord attribute.
+    """A str subclass carrying an actual ProvenanceRecord attribute.
 
-    Only operations explicitly overridden here (__add__, __radd__) propagate
-    provenance automatically. Every other str method (.upper(), .split(),
-    slicing, str(), f-string embedding via BUILD_STRING, ...) returns a
-    plain, unflagged str -- a documented gap closed incrementally in
-    propagation.py (Phase 2, §6 of the spec).
+    Only the operations explicitly overridden here, __add__ and __radd__,
+    propagate provenance automatically. Every other str method, such as
+    .upper(), .split(), slicing, str(), or f-string embedding, returns a
+    plain, unflagged str.
     """
 
     _provenance: ProvenanceRecord
@@ -143,18 +132,12 @@ class ProvenanceStr(str):
         return ProvenanceStr(result, merged)
 
     def __str__(self) -> str:
-        # str(x) always calls type(x).__str__(x) per the data model, and it
-        # genuinely constructs a *new* plain str object -- confirmed
-        # empirically, `str.__str__(subclass_instance) is subclass_instance`
-        # is False. That's the exact mechanism that lets a flag silently
-        # vanish through code we don't control: found for real in
-        # GitPython's Git._unpack_args(), which does `str(arg)` on every
-        # command-line argument before building the subprocess call (see
-        # target/ in the README). Registering the new plain string in the
-        # side-table -- rather than trying to avoid creating one, which
-        # isn't possible, str's own contract requires returning a plain
-        # str -- closes this specific gap without changing what str(x)
-        # returns to unrelated callers.
+        # Calling str(x) constructs a new plain str object, not self, so a
+        # flag would silently vanish through any code that calls str() on
+        # us. This happens, not just hypothetically, inside GitPython's
+        # Git._unpack_args(), see the target directory referenced in the
+        # README. Registering the new string in the side table keeps it
+        # tracked.
         result = str.__str__(self)
         side_table.attach(result, self._provenance)
         return result
@@ -167,10 +150,10 @@ class ProvenanceStr(str):
 
 
 class ProvenanceDict(dict):
-    """A dict subclass tracking per-key ProvenanceRecords for values that
-    don't carry their own (e.g. plain ints/floats). Values that are already
-    ProvenanceStr/ProvenanceDict keep their own record; get_item_provenance
-    checks both.
+    """A dict subclass tracking a ProvenanceRecord per key for values that
+    don't carry their own, such as plain ints or floats. Values that are
+    already a ProvenanceStr or ProvenanceDict keep their own record, and
+    get_item_provenance checks both.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:

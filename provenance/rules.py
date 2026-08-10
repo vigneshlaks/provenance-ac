@@ -1,15 +1,11 @@
-"""v1 source/sink/sanitizer rules (spec §5) and enforcement.
+"""Source, sink, and sanitizer rules, and the enforcement built on top of them.
 
-See instrument.py's ADR-002 for why this uses direct wrapping of the target
-callables (requests.get/post, subprocess.run/Popen, builtins.open) rather
-than sys.monitoring's CALL event: CALL only exposes the first positional
-argument, and a CALL callback that does real work risks a reentrant crash.
-Wrapping gets the real *args/**kwargs directly from the call site, with
-neither problem.
-
-Sources tag return values with a ProvenanceRecord. Sinks call find_flagged()
-on their arguments and raise ProvenanceViolation if anything flagged and
-unsanitized is found.
+The target callables are wrapped directly (requests.get and requests.post,
+subprocess.run and subprocess.Popen, builtins.open) rather than going
+through sys.monitoring's CALL event. The reasoning for that choice lives in
+instrument.py. Sources tag their return values with a ProvenanceRecord, and
+sinks call find_flagged() on their arguments, raising ProvenanceViolation if
+anything flagged and unsanitized turns up.
 """
 
 from __future__ import annotations
@@ -27,7 +23,7 @@ from .storage import ProvenanceDict, ProvenanceRecord, ProvenanceStr, get_proven
 
 try:
     import requests
-except ImportError:  # pragma: no cover - requests is a demo dependency, not core
+except ImportError:  # pragma: no cover; requests is a demo dependency, not core
     requests = None
 
 
@@ -36,10 +32,9 @@ except ImportError:  # pragma: no cover - requests is a demo dependency, not cor
 # --------------------------------------------------------------------------
 
 def sanitizer(func: Callable) -> Callable:
-    """Decorator: calling `func` clears the provenance flag on its return
-    value. v1 does not verify the function actually does anything -- the
-    sanitizer is trusted by declaration (spec §5, a documented limitation).
-    """
+    """A decorator. Calling the wrapped function clears the provenance flag
+    on whatever it returns. This is trusted by declaration, since nothing
+    checks that the function actually sanitized anything."""
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -57,8 +52,8 @@ def sanitizer(func: Callable) -> Callable:
 
 
 # --------------------------------------------------------------------------
-# Recursive flagged-value scan (spec §5: "inspect all arguments, recursively
-# through basic containers")
+# Recursive scan for flagged values, walking arguments through basic
+# containers
 # --------------------------------------------------------------------------
 
 def _walk(value: Any) -> Iterator[Any]:
@@ -72,8 +67,9 @@ def _walk(value: Any) -> Iterator[Any]:
 
 
 def find_flagged(*args: Any, **kwargs: Any) -> tuple[Any, "ProvenanceRecord | None"]:
-    """Return (value, record) for the first flagged-and-unsanitized value
-    found in args/kwargs, or (None, None) if none found."""
+    """Returns the first value found in args or kwargs that is flagged and
+    not sanitized, along with its record, or (None, None) if nothing
+    matches."""
     for value in _walk(args):
         record = get_provenance(value)
         if record is not None and record.flagged():
@@ -91,14 +87,12 @@ _approval_hook: "ApprovalHook | None" = None
 
 
 def set_approval_hook(hook: "ApprovalHook | None") -> None:
-    """Layer 8 (human oversight): register a callback invoked when a sink
-    call would otherwise be blocked, so a human (or an explicit policy) can
-    approve it instead of a flat deny. `hook(sink_name, value, record)` ->
-    bool; returning True approves the call (it proceeds as if unflagged),
-    False denies it (same as no hook). Opt-in and off by default -- with no
-    hook registered, behavior is identical to before this existed: a flat
-    block. Pass None to unregister.
-    """
+    """Registers a callback invoked when a sink call would otherwise be
+    blocked, so a human, or some other policy, can approve it instead of a
+    flat denial. The hook takes the sink name, the value, and the record,
+    and returns True to approve the call or False to deny it, the same as
+    if no hook were registered. No hook is registered by default. Passing
+    None removes it."""
     global _approval_hook
     _approval_hook = hook
 
@@ -120,9 +114,10 @@ def check_sink(sink_name: str, *args: Any, **kwargs: Any) -> None:
 # --------------------------------------------------------------------------
 
 def tag_source(value: Any, origin: str) -> Any:
-    """Tag a plain value (str, bytes, int, float, dict, list) as coming from
-    `origin`. Strings get wrapped in ProvenanceStr; dict/list get walked
-    recursively (§6 item 4); other primitives fall back to the side-table."""
+    """Tags a plain value (a string, bytes, int, float, dict, or list) as
+    coming from the given origin. Strings get wrapped in a ProvenanceStr.
+    Dicts and lists get walked recursively. Everything else falls back to
+    the side table."""
     if isinstance(value, str):
         return ProvenanceStr(value, ProvenanceRecord(origins=(origin,)))
     if isinstance(value, dict):
@@ -163,7 +158,7 @@ def _inside_workspace(path: Any) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Sink/source: subprocess.run / subprocess.Popen
+# Sink and source: subprocess.run and subprocess.Popen
 # --------------------------------------------------------------------------
 
 _original_run = subprocess.run
@@ -186,7 +181,7 @@ class _PopenWrapper(_original_popen):
 
 
 # --------------------------------------------------------------------------
-# Sink/source: requests.get / requests.post
+# Sink and source: requests.get and requests.post
 # --------------------------------------------------------------------------
 
 if requests is not None:
@@ -220,7 +215,7 @@ if requests is not None:
 
 
 # --------------------------------------------------------------------------
-# Source/sink: open(...).read() / open(path, 'w').write()
+# Source and sink: open(...).read() and open(path, 'w').write()
 # --------------------------------------------------------------------------
 
 _original_open = builtins.open
@@ -239,7 +234,7 @@ class _TrackedFile:
 
     def write(self, data: Any) -> Any:
         if not _inside_workspace(self._path):
-            check_sink(f"open({self._path!r}, write-mode).write [outside workspace]", data)
+            check_sink(f"open({self._path!r}, write mode).write, outside the workspace", data)
         return self._fileobj.write(data)
 
     def __enter__(self) -> "_TrackedFile":
@@ -263,7 +258,7 @@ def _open_wrapper(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> _Tra
 
 
 # --------------------------------------------------------------------------
-# Install / uninstall
+# Install and uninstall
 # --------------------------------------------------------------------------
 
 _installed = False

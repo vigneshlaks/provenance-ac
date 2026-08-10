@@ -1,7 +1,7 @@
-"""Phase 2 milestone (spec §8): a hand-written script (file read -> concat ->
-network POST) gets correctly blocked; a sanitized version gets correctly
-allowed. Extended to cover subprocess and the workspace-boundary file-write
-sink too, since §5 lists all three as v1 sinks.
+"""A hand written script, reading a file, concatenating it into a string,
+then posting over the network, gets correctly blocked, and a sanitized
+version gets correctly allowed. This also covers subprocess and the
+workspace boundary file write sink.
 """
 
 import subprocess
@@ -15,7 +15,8 @@ from provenance.rules import sanitizer
 
 
 # --------------------------------------------------------------------------
-# Incident-A-shaped milestone: file read -> concat -> requests.post
+# The shape of Incident A: a file read, concatenated, then posted with
+# requests.post
 # --------------------------------------------------------------------------
 
 def test_file_to_post_blocked_without_sanitizing(tmp_path):
@@ -111,7 +112,7 @@ def test_subprocess_stdout_is_tagged_as_source():
 
 
 # --------------------------------------------------------------------------
-# open(...).write() outside declared workspace
+# open(...).write() outside the declared workspace
 # --------------------------------------------------------------------------
 
 def test_write_outside_workspace_blocked(tmp_path):

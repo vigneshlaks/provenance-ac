@@ -1,67 +1,37 @@
 """sys.monitoring (PEP 669) integration.
 
-Architecture decision (ADR-001), resolved empirically before writing this
-file -- see tests/test_propagation.py and the commands recorded in the repo
-README for how each claim below was checked on Python 3.13:
+Why this module doesn't do more than it does:
 
-1. sys.monitoring has no STORE_NAME- or BINARY_OP-*named* events. The event
-   set is {PY_START, PY_RESUME, PY_RETURN, PY_YIELD, PY_UNWIND, PY_THROW,
-   CALL, C_RETURN, C_RAISE, LINE, INSTRUCTION, JUMP, BRANCH, RAISE, RERAISE,
-   EXCEPTION_HANDLED, STOP_ITERATION}. Catching a specific opcode like
-   STORE_NAME or BINARY_OP requires enabling INSTRUCTION (fires per bytecode
-   instruction executed -- expensive) and decoding the opcode yourself.
+Assignment, as in b = a, needs no instrumentation at all. CPython name
+binding just rebinds a name to the same object, so a ProvenanceStr's
+_provenance attribute survives automatically. Concatenation, as in a + b, is
+handled by ProvenanceStr.__add__ and __radd__ in storage.py, since
+CPython's + dispatches through the normal operator protocol even for str
+subclasses. Neither one needs bytecode level tracing.
 
-2. That INSTRUCTION-level tracing turns out to be unnecessary for variable
-   assignment and string concatenation specifically:
-   - Assignment (`b = a`) is free: CPython name binding just rebinds a name
-     to the same object. If `a` is a ProvenanceStr, `b` is the identical
-     object with its `_provenance` attribute intact -- no instrumentation
-     of any kind is involved.
-   - Concatenation (`a + b`) is handled by ProvenanceStr.__add__/__radd__
-     (see storage.py). CPython's `+` operator dispatches through the normal
-     `__add__`/`__radd__` protocol even for str subclasses, confirmed with:
-       class S(str):
-           def __add__(self, other): return S(str.__add__(self, other))
-       type(S("a") + "b") is S   # True
-     So provenance-aware concatenation is just operator overloading; no
-     bytecode hook is needed for it either.
+sys.monitoring's CALL event isn't used for sink and source enforcement,
+even though it looks like a natural fit. Its callback signature is
+(code, instruction_offset, callable, arg0), which only exposes the first
+positional argument, and for bound methods that argument is self, so it
+isn't enough to inspect every argument at a sink call. It is also
+reentrant: a callback that does actual work, such as a print call, a dict
+lookup, or string formatting, is itself a call, which re-triggers CALL and
+can cascade into monitoring the interpreter's own internal calls. The
+reentrancy guard in _dispatch_call below handles the cascade, but it
+doesn't fix the missing arguments problem.
 
-3. sys.monitoring's CALL event fires with signature
-   `(code, instruction_offset, callable, arg0)` on every call, including
-   calls to builtins/C functions -- confirmed empirically.
+rules.py enforces sinks and sources instead by directly wrapping the target
+callables, monkey patching requests.post, subprocess.run, builtins.open,
+and so on, so the wrapper gets the actual positional and keyword arguments
+straight from the call site. The CALL event plumbing below is kept as
+working infrastructure for coverage and observability, for example
+answering "did we see a call to something with no source or sink rule", but
+it isn't the enforcement mechanism.
 
-Fallback clause per spec §4: if a future propagation rule genuinely can't be
-expressed as a wrapper-type override (e.g. f-string embedding via
-BUILD_STRING, which coerces to plain `str` regardless of what __format__
-returns -- also confirmed empirically), INSTRUCTION-level tracing is the
-documented fallback, deferred to a later phase rather than built
-speculatively here.
-
-ADR-002 (Phase 2): CALL was *not* used for sink/source enforcement, despite
-the ADR-001 plan to use it there. Two things ruled it out, both confirmed
-empirically before rules.py was written:
-
-- `arg0` is only the *first* positional argument (and for bound methods,
-  it's `self`, not the caller's first real argument). §5 requires
-  inspecting *all* arguments (recursively through containers) at a sink
-  call; CALL's signature structurally cannot provide that.
-- A CALL callback that does real work -- a print(), a dict lookup, string
-  formatting -- is itself a call, which re-triggers CALL recursively.
-  Confirmed by crashing a Python process this way: a callback that called
-  print() cascaded into monitoring every call the interpreter made
-  internally (import machinery, module locks, ...) until it blew up. A
-  reentrancy guard (a module-level "already inside the callback" flag,
-  used below in _dispatch_call) fixes this, but it does not fix the arg0
-  problem.
-
-rules.py instead enforces sinks/sources by directly wrapping the target
-callables (monkey-patching e.g. `requests.post`, `subprocess.run`,
-`builtins.open`) so the wrapper receives the real `*args, **kwargs`
-directly from the call site -- no event system involved, no arg0
-limitation, no reentrancy risk. The CALL-event plumbing below is kept
-because it is real, working, tested infrastructure, and remains available
-for coverage/observability uses (e.g. "did we see a call to something we
-have no source/sink rule for") -- it is just not the enforcement mechanism.
+If a future propagation rule can't be expressed as a wrapper type override,
+for example f-string embedding, which coerces to a plain str regardless of
+what __format__ returns, INSTRUCTION level tracing is the fallback. It
+isn't needed yet for anything currently propagated.
 """
 
 from __future__ import annotations
@@ -80,18 +50,18 @@ _dispatching = False
 
 
 def register_call_hook(hook: CallHook) -> None:
-    """Register a callback invoked on every CALL event, with signature
-    (code, instruction_offset, callable, arg0). Not used for sink/source
-    enforcement -- see ADR-002 above -- but available for coverage/
-    observability tooling.
+    """Registers a callback invoked on every CALL event, with the signature
+    (code, instruction_offset, callable, arg0). This is not used for sink
+    or source enforcement, see the module docstring, but it is available
+    for coverage and observability tooling.
     """
     _call_hooks.append(hook)
 
 
 def _dispatch_call(code: Any, instruction_offset: int, callable_: Any, arg0: Any) -> None:
-    # Reentrancy guard: any hook that itself makes a call (print, a dict
-    # lookup, ...) would otherwise re-trigger this same CALL event and
-    # cascade -- confirmed by crashing a process this way. See ADR-002.
+    # Reentrancy guard. A hook that itself makes a call, such as a print or
+    # a dict lookup, would otherwise re-trigger this same CALL event and
+    # cascade into monitoring the interpreter's own internal calls.
     global _dispatching
     if _dispatching:
         return
@@ -104,8 +74,8 @@ def _dispatch_call(code: Any, instruction_offset: int, callable_: Any, arg0: Any
 
 
 def start() -> None:
-    """Install the CALL-event monitor. Safe to call once; raises if already
-    active or if the tool id is claimed by something else."""
+    """Installs the CALL event monitor. Safe to call once. Raises if it is
+    already active, or if the tool id is claimed by something else."""
     global _active
     if _active:
         return
@@ -116,7 +86,7 @@ def start() -> None:
 
 
 def stop() -> None:
-    """Uninstall the monitor and free the tool id."""
+    """Uninstalls the monitor and frees the tool id."""
     global _active
     if not _active:
         return

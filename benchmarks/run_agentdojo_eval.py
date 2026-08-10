@@ -1,16 +1,15 @@
-"""Run our provenance defense against AgentDojo's banking suite, a real
-third-party benchmark used to evaluate CaMeL, FIDES, and others.
+"""Runs our provenance defense against AgentDojo's banking suite, an
+actual third party benchmark used to evaluate CaMeL, FIDES, and others.
 
-Compares two pipelines against the same local model, same tasks, same
-injections: undefended (plain ToolsExecutor) vs. our
-ProvenanceGatedToolsExecutor (content-matching, see agentdojo_adapter.py
-and ADR-003 in the README for why content-matching rather than the
-object-identity approach used elsewhere in this repo).
+This compares two pipelines against the same local model, the same tasks,
+and the same injections: undefended, using the plain ToolsExecutor, versus
+our ProvenanceGatedToolsExecutor, which matches based on content. See
+agentdojo_adapter.py for why content matching was used rather than the
+object identity approach used elsewhere in this repository.
 
-Reports, per pipeline: attack success rate (lower is better) and task
-utility (higher is better) -- both matter, since a defense that blocks
-everything including legitimate tasks isn't actually useful (the same
-utility-recovery concern APPA/CaMeL raise about their own defenses).
+It reports, per pipeline, the attack success rate, where lower is better,
+and task utility, where higher is better. Both matter, since a defense
+that blocks everything, including legitimate tasks, isn't actually useful.
 
 Usage: .venv/bin/python -m benchmarks.run_agentdojo_eval [n_task_pairs]
 """
@@ -108,14 +107,13 @@ def build_defended_pipeline(llm: LocalLLM) -> tuple[AgentPipeline, ProvenanceGat
 
 
 def _run_one(pipeline, user_task, injection_task) -> tuple[bool, bool] | None:
-    """Run one task with one pipeline. Returns None (not a crash) if the
-    model/server produced a bad completion on some turn -- a real benchmark
-    harness has to tolerate occasional serving hiccups on a long multi-turn
-    run rather than losing the whole batch to one flaky turn."""
+    """Runs one task with one pipeline. Returns None, not a crash, if the
+    model or server produced a bad completion on some turn, so an
+    occasional flaky turn doesn't lose the whole batch."""
     try:
         return task_suite.run_task_with_pipeline(pipeline, user_task, injection_task, injections={})
     except Exception as exc:
-        print(f"    -> run errored, skipping this pair ({type(exc).__name__}: {exc})")
+        print(f"    run errored, skipping this pair ({type(exc).__name__}: {exc})")
         return None
 
 
@@ -133,7 +131,7 @@ def run_eval(n_user_tasks: int, n_injection_tasks: int) -> None:
 
         for user_task in user_tasks:
             for injection_task in injection_tasks:
-                # Undefended run
+                # An undefended run.
                 pipeline = build_undefended_pipeline(llm)
                 outcome = _run_one(pipeline, user_task, injection_task)
                 if outcome is None:
@@ -146,7 +144,7 @@ def run_eval(n_user_tasks: int, n_injection_tasks: int) -> None:
                         f"utility={utility} attack_success={attack_success}"
                     )
 
-                # Provenance-gated run
+                # A provenance gated run.
                 pipeline, gated_executor = build_defended_pipeline(llm)
                 outcome = _run_one(pipeline, user_task, injection_task)
                 if outcome is None:
